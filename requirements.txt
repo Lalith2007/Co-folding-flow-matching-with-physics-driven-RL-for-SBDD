@@ -1,0 +1,17 @@
+# Core Deep Learning
+torch>=2.0.0
+
+# Chemistry & Biology
+rdkit-pypi
+biopython
+
+# Math, Data, and Config
+numpy<2.0.0
+PyYAML
+scipy
+pandas
+
+# Backend API
+fastapi
+uvicorn
+python-multipart

@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>RL Diffusion SBDD — Final Architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet"/>
+<style>
+:root{--bg:#080a0f;--bg1:#0d1018;--bg2:#111520;--border:#1e2535;--border2:#2a3448;--text:#c8d0e0;--dim:#5a6480;--bright:#e8edf8;--teal:#00d4a8;--teal-d:#003d30;--teal-m:#007a60;--purple:#9b7ff4;--purple-d:#1a1040;--purple-m:#4a3090;--amber:#f5a623;--amber-d:#2a1a00;--coral:#ff6b6b;--coral-d:#2a0a0a;--blue:#4da6ff;--blue-d:#041828;--green:#5ec95e;--green-d:#051505;--red:#ff4444;--mono:'JetBrains Mono',monospace;--sans:'Syne',sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:12px;line-height:1.6;padding:40px 32px}
+.hdr{text-align:center;margin-bottom:44px}
+.hdr-tag{font-size:9px;letter-spacing:3px;color:var(--teal);text-transform:uppercase;margin-bottom:10px}
+.hdr h1{font-family:var(--sans);font-size:26px;font-weight:800;color:var(--bright);margin-bottom:6px}
+.hdr-sub{color:var(--dim);font-size:11px}
+.sec{margin-bottom:28px}
+.sec-lbl{font-size:9px;letter-spacing:3px;text-transform:uppercase;color:var(--dim);margin-bottom:10px;display:flex;align-items:center;gap:10px}
+.sec-lbl::after{content:'';flex:1;height:1px;background:var(--border)}
+.card{border-radius:10px;border:1px solid var(--border);padding:16px 18px;background:var(--bg1);position:relative;overflow:hidden;margin-bottom:10px}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;border-radius:10px 10px 0 0}
+.card.teal{border-color:var(--teal-m);background:linear-gradient(135deg,var(--teal-d),var(--bg1))}.card.teal::before{background:linear-gradient(90deg,var(--teal),transparent)}
+.card.purple{border-color:var(--purple-m);background:linear-gradient(135deg,var(--purple-d),var(--bg1))}.card.purple::before{background:linear-gradient(90deg,var(--purple),transparent)}
+.card.amber{border-color:#5a3a00;background:linear-gradient(135deg,var(--amber-d),var(--bg1))}.card.amber::before{background:linear-gradient(90deg,var(--amber),transparent)}
+.card.coral{border-color:#5a1a1a;background:linear-gradient(135deg,var(--coral-d),var(--bg1))}.card.coral::before{background:linear-gradient(90deg,var(--coral),transparent)}
+.card.blue{border-color:#1a3a5a;background:linear-gradient(135deg,var(--blue-d),var(--bg1))}.card.blue::before{background:linear-gradient(90deg,var(--blue),transparent)}
+.card.green{border-color:#1a4a1a;background:linear-gradient(135deg,var(--green-d),var(--bg1))}.card.green::before{background:linear-gradient(90deg,var(--green),transparent)}
+.card.gray{border-color:var(--border2);background:var(--bg2)}
+.ct{font-family:var(--sans);font-size:14px;font-weight:700;margin-bottom:5px;color:var(--bright)}
+.card.teal .ct{color:var(--teal)}.card.purple .ct{color:var(--purple)}.card.amber .ct{color:var(--amber)}.card.coral .ct{color:var(--coral)}.card.blue .ct{color:var(--blue)}.card.green .ct{color:var(--green)}
+.cs{color:var(--dim);font-size:11px;margin-bottom:12px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.g4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px}
+.sg{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+.stat{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center}
+.sv{font-family:var(--sans);font-size:20px;font-weight:800;color:var(--teal);display:block;margin-bottom:2px}
+.sl{font-size:10px;color:var(--dim)}
+.cells{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+.cell{flex:1;min-width:120px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:7px;padding:10px 12px}
+.ctt{font-size:11px;font-weight:600;color:var(--bright);margin-bottom:4px}
+.cb{font-size:10px;color:var(--dim);line-height:1.5}
+.badge{display:inline-block;font-size:9px;font-weight:600;padding:2px 7px;border-radius:20px;margin-left:8px;vertical-align:middle;letter-spacing:.5px;text-transform:uppercase}
+.bn{background:rgba(0,212,168,.15);color:var(--teal);border:1px solid var(--teal-m)}
+.bk{background:rgba(155,127,244,.15);color:var(--purple);border:1px solid var(--purple-m)}
+.bw{background:rgba(245,166,35,.15);color:var(--amber);border:1px solid #5a3a00}
+.dr{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.dl{width:88px;font-size:10px;color:var(--dim);text-align:right;flex-shrink:0}
+.db{flex:1;height:15px;background:var(--bg2);border-radius:3px;overflow:hidden}
+.df{height:100%;border-radius:3px}
+.dv{width:70px;font-size:10px;color:var(--dim)}
+.arr{text-align:center;margin:6px 0}
+.arl{width:1px;height:18px;background:var(--border2);margin:0 auto}
+.arh{width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-top:9px solid var(--border2);margin:0 auto}
+.math{font-size:10px;color:var(--purple);background:rgba(155,127,244,.08);border:1px solid var(--purple-m);border-radius:6px;padding:10px 14px;margin-top:8px;white-space:pre;overflow-x:auto;line-height:1.7}
+.warn{border:1px solid #5a3a00;border-radius:7px;padding:9px 13px;background:var(--amber-d);font-size:11px;color:var(--amber);margin-top:10px}
+.ok{border:1px solid var(--teal-m);border-radius:7px;padding:9px 13px;background:var(--teal-d);font-size:11px;color:var(--teal);margin-top:10px}
+.fb{border:1px dashed var(--teal-m);border-radius:8px;padding:10px 14px;background:rgba(0,212,168,.04);font-size:11px;color:var(--teal);margin-top:10px;display:flex;align-items:center;gap:10px}
+.tbl{width:100%;border-collapse:collapse;margin-top:10px}
+.tbl th{text-align:left;padding:7px 10px;font-size:10px;color:var(--dim);border-bottom:1px solid var(--border);font-weight:600;letter-spacing:1px;text-transform:uppercase}
+.tbl td{padding:8px 10px;font-size:11px;border-bottom:1px solid var(--border);vertical-align:top}
+.tbl tr:last-child td{border-bottom:none}
+.good{color:var(--green)}.bad{color:var(--red)}.ours{background:rgba(155,127,244,.05)}
+.mt{margin-top:10px}
+hr{border:none;border-top:1px solid var(--border);margin:6px 0}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div class="hdr-tag">Structure-Based Drug Design · Complete Specification</div>
+  <h1>RL-Guided Flow Diffusion SBDD</h1>
+  <div class="hdr-sub">final_dataset.json · 64,759 pairs · 13,275 proteins · 4 sub-datasets · 100% Vina-scored · Designed to outperform DiffSBDD + TargetDiff</div>
+</div>
+
+<!-- ── SECTION 1: DATASET ── -->
+<div class="sec">
+  <div class="sec-lbl">01 — Dataset Analysis (final_dataset.json)</div>
+
+  <div class="sg">
+    <div class="stat"><span class="sv">64,759</span><span class="sl">Total pocket-ligand pairs</span></div>
+    <div class="stat"><span class="sv">13,275</span><span class="sl">Unique proteins (PDB IDs)</span></div>
+    <div class="stat"><span class="sv">100%</span><span class="sl">Pairs have Vina affinity</span></div>
+    <div class="stat"><span class="sv">59.4%</span><span class="sl">Proteins span ≥2 datasets</span></div>
+  </div>
+
+  <div class="g4" style="margin-bottom:10px">
+    <div class="cell"><div class="ctt" style="color:var(--blue)">CrossDocked</div><div class="cb">40,271 pairs · .pdb pockets<br>mean −8.89 kcal/mol<br>range −22.8 → +106<br><span style="color:var(--amber)">⚠ 83 positive artifacts</span></div></div>
+    <div class="cell"><div class="ctt" style="color:var(--green)">HiQBind</div><div class="cb">13,482 pairs · .pdb pockets<br>mean −7.19 kcal/mol<br>range −16.7 → +14.2<br><span style="color:var(--amber)">⚠ 8 positive artifacts</span></div></div>
+    <div class="cell"><div class="ctt" style="color:var(--purple)">PDBbind</div><div class="cb">7,050 pairs · .pdb pockets<br>mean −7.55 kcal/mol<br>range −16.8 → −3.0<br><span style="color:var(--teal)">✓ Cleanest subset</span></div></div>
+    <div class="cell"><div class="ctt" style="color:var(--teal)">scPDB</div><div class="cb">3,956 pairs · .mol2 pockets<br>mean −7.11 kcal/mol<br>range −16.9 → −2.1<br>Human proteins only</div></div>
+  </div>
+
+  <div class="card gray">
+    <div class="ct" style="color:var(--bright)">Affinity Distribution · Global mean −8.28 · stdev 2.31 kcal/mol</div>
+    <div class="dr"><div class="dl">−22 → −14</div><div class="db"><div class="df" style="width:0.4%;background:var(--coral)"></div></div><div class="dv">242 · 0.4%</div></div>
+    <div class="dr"><div class="dl">−14 → −12</div><div class="db"><div class="df" style="width:5%;background:var(--amber)"></div></div><div class="dv">2,494 · 3.9%</div></div>
+    <div class="dr"><div class="dl">−12 → −10</div><div class="db"><div class="df" style="width:22%;background:var(--blue)"></div></div><div class="dv">11,097 · 17.1%</div></div>
+    <div class="dr"><div class="dl">−10 → −8 ★</div><div class="db"><div class="df" style="width:44%;background:var(--teal)"></div></div><div class="dv">22,042 · 34.0%</div></div>
+    <div class="dr"><div class="dl">−8 → −6</div><div class="db"><div class="df" style="width:38%;background:var(--teal)"></div></div><div class="dv">19,220 · 29.7%</div></div>
+    <div class="dr"><div class="dl">−6 → −4</div><div class="db"><div class="df" style="width:18%;background:var(--purple)"></div></div><div class="dv">8,848 · 13.7%</div></div>
+    <div class="dr"><div class="dl">−4 → 0</div><div class="db"><div class="df" style="width:1.5%;background:var(--dim)"></div></div><div class="dv">732 · 1.1%</div></div>
+    <div class="warn">⚠ Preprocessing: clip to [−16, 0] → removes 93 outliers (0.14%) · normalize reward r = |affinity|/16 ∈ [0,1] · intra-protein spread mean 2.61 kcal/mol → use for contrastive ranking loss within same protein · Top-10% strong binders threshold: ≤ −10.19 kcal/mol (25th percentile CrossDocked)</div>
+  </div>
+
+  <div class="card green">
+    <div class="ct">Train / Val / Test Split — by protein to prevent leakage</div>
+    <div class="cells">
+      <div class="cell"><div class="ctt">Train</div><div class="cb">10,620 proteins · ~56,280 pairs · all 4 datasets</div></div>
+      <div class="cell"><div class="ctt">Validation</div><div class="cb">1,327 proteins · ~6,013 pairs · monitor loss + Vina</div></div>
+      <div class="cell"><div class="ctt">Test</div><div class="cb">1,327 proteins · ~2,466 pairs · held-out, never seen</div></div>
+      <div class="cell"><div class="ctt">RL subset</div><div class="cb">Top-10% affinity pockets from train · ~5,600 pairs for fine-tuning</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="arr"><div class="arl"></div><div class="arh"></div></div>
+
+<!-- ── SECTION 2: POCKET ENCODER ── -->
+<div class="sec">
+  <div class="sec-lbl">02 — Pocket Encoder <span class="badge bn">improved over both papers</span></div>
+  <div class="card teal">
+    <div class="ct">Multi-resolution SE(3)-EGNN Pocket Encoder</div>
+    <div class="cs">Handles .pdb (60,803 pairs) + .mol2 (3,956 pairs) · outputs h_P ∈ ℝ^{N_P×128} used in cross-attention at every model layer</div>
+    <div class="g4">
+      <div class="cell"><div class="ctt">Atom features</div><div class="cb">Element (15-hot) · amino acid type (20+UNK) · backbone/sidechain flag · partial charge · H-bond donor/acceptor</div></div>
+      <div class="cell"><div class="ctt">Residue features</div><div class="cb">Secondary structure · SASA (solvent access) · distance to pocket centroid · hydrophobicity · B-factor</div></div>
+      <div class="cell"><div class="ctt">Graph build</div><div class="cb">k-NN k=16 on pocket atoms · RBF distance edge features · dynamic graph per layer · x_P never updated</div></div>
+      <div class="cell"><div class="ctt">Output</div><div class="cb">h_P ∈ ℝ^{N_P×128} · per-atom embeddings · global mean-pool for size prediction · cross-attend into every EGNN layer</div></div>
+    </div>
+    <div class="warn">⚠ For .mol2 (scPDB): parse with RDKit · map mol2 atom types to same 15-dim one-hot as PDB · define pocket boundary consistently as residues within 8Å of any ligand atom</div>
+  </div>
+</div>
+
+<div class="arr"><div class="arl"></div><div class="arh"></div></div>
+
+<!-- ── SECTION 3: FLOW MATCHING BACKBONE ── -->
+<div class="sec">
+  <div class="sec-lbl">03 — Flow Matching Backbone <span class="badge bn">replaces 1000-step DDPM</span></div>
+  <div class="card blue">
+    <div class="ct">Rectified Flow Matching — Why it beats DDPM for RL</div>
+    <div class="cs">DDPM curved Markov paths make log p(m|pocket) hard to compute → breaks policy gradient · Flow Matching straight paths → tractable ODE likelihood → direct ∇θ log p for DDPO</div>
+    <div class="g2">
+      <div>
+        <div class="ctt" style="color:var(--blue);margin-bottom:4px">Forward (training)</div>
+        <div class="math">z_t = (1−t)·z_data + t·z_noise,  t ∈ [0,1]
+Target velocity: u_t = z_noise − z_data
+Network: v_θ(z_t, t, pocket) ≈ u_t
+Loss: E_t[ ||v_θ(z_t,t,P) − u_t||² ]
+Affinity weighting: w_i = softmax(|aff_i|/T)</div>
+      </div>
+      <div>
+        <div class="ctt" style="color:var(--blue);margin-bottom:4px">Reverse (sampling)</div>
+        <div class="math">Start: z_0 ~ N(0,I)
+Euler step: z_{t+Δt} = z_t + v_θ(z_t,t,P)·Δt
+50 steps sufficient (20× faster than DDPM)
+log p via instantaneous change-of-variables:
+d/dt log p(z_t) = −Tr(∂v_θ/∂z_t)</div>
+      </div>
+    </div>
+    <div class="cells mt">
+      <div class="cell"><div class="ctt">Coord flow</div><div class="cb">Continuous · x ∈ ℝ^{N×3} · zero CoM of protein · SE(3)-equivariant updates</div></div>
+      <div class="cell"><div class="ctt">Atom type flow</div><div class="cb">Categorical · {C,N,O,S,F,Cl,Br,P,I,B} · uniform noise mixing · one-hot at t=1</div></div>
+      <div class="cell"><div class="ctt">Affinity bias</div><div class="cb">Higher affinity pairs weighted more in training · flow manifold skewed toward strong binders from pretraining</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="arr"><div class="arl"></div><div class="arh"></div></div>
+
+<!-- ── SECTION 4: CORE EGNN ── -->
+<div class="sec">
+  <div class="sec-lbl">04 — Unified SE(3)-EGNN with Cross-Attention <span class="badge bk">core model θ</span></div>
+  <div class="card purple">
+    <div class="ct">9-Layer SE(3)-Equivariant GNN · hidden_dim=128 · 16 attention heads</div>
+    <div class="cs">Key improvement over both papers: cross-attention from pocket at every layer — not just appended nodes (DiffSBDD) or k-NN edges (TargetDiff)</div>
+    <div class="g2">
+      <div>
+        <div class="ctt" style="color:var(--purple);margin-bottom:4px">Per-layer update (ligand atoms)</div>
+        <div class="math">// 1. Cross-attend to pocket
+α_i = softmax(Q(h_i)·K(h_P)ᵀ / √128)
+c_i = V(h_P)·α_i  [pocket context]
+h_i = h_i + LayerNorm(c_i)
+
+// 2. EGNN message passing
+m_ij = φ_e(h_i, h_j, d²_ij, e_ij)
+ẽ_ij = φ_att(m_ij)  [attention gate]
+h_i' = φ_h(h_i, Σ_j ẽ_ij·m_ij)
+
+// 3. Equivariant coord update (SE3 not E3)
+Δx_i = Σ_j [(x_i−x_j)/d_ij]·φ_d(h_i,h_j,d²,e)
+     + [(x_i−x̄)×(x_j−x̄)] / (||...||+1)·φ_×(...)
+x_i' = x_i + Δx_i  [ligand only, not pocket]</div>
+      </div>
+      <div>
+        <div class="ctt" style="color:var(--purple);margin-bottom:4px">Affinity value head (critic)</div>
+        <div class="math">// Pooled ligand representation
+h_pool = MeanPool(h_L over ligand atoms)
+
+// Predict affinity (pK proxy)
+pK_pred = MLP(h_pool)  [trained on 64K pairs]
+
+// Used as cheap RL reward proxy
+r_proxy = sigmoid(pK_pred / 16)
+
+// Also: entropy of denoised atom types
+// as secondary affinity signal (TargetDiff insight)
+r_entropy = −H(softmax(v̂_0))</div>
+        <div class="ok mt">✓ Value head trained jointly on ALL 64,759 pairs during pretraining · used at every RL step · Vina called only every 10 rounds as ground-truth check</div>
+      </div>
+    </div>
+    <div class="cells mt">
+      <div class="cell"><div class="ctt">SE(3) equivariance</div><div class="cb">p(Rx+t|Rx_P+t) = p(x|x_P) · zero CoM on protein · cross-product term breaks E(3)→SE(3)</div></div>
+      <div class="cell"><div class="ctt">Stereochemistry</div><div class="cb">SE(3) not E(3) → reflection-sensitive · distinguishes R/S enantiomers · critical for drug safety</div></div>
+      <div class="cell"><div class="ctt">Size prediction</div><div class="cb">N_L ~ p(N_L|N_P) from global pocket embedding · pocket-size-conditioned prior over #atoms</div></div>
+      <div class="cell"><div class="ctt">Featurization</div><div class="cb">Ligand: element + aromaticity (one-hot) · Pocket: element + residue + backbone · joint embedding MLP</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="arr"><div class="arl"></div><div class="arh"></div></div>
+
+<!-- ── SECTION 5: REWARD ── -->
+<div class="sec">
+  <div class="sec-lbl">05 — Multi-Objective Reward Oracle R(m, pocket)</div>
+  <div class="card amber">
+    <div class="ct">Reward = w₁·r_vina + w₂·r_qed + w₃·r_sa + w₄·r_lipinski + w₅·r_proxy</div>
+    <div class="cs">Normalised to [0,1] · weights tuned on validation set · Vina expensive (every 10 rounds) · proxy cheap (every round)</div>
+    <div class="g3">
+      <div class="cell">
+        <div class="ctt" style="color:var(--amber)">r_vina (w₁=0.40)</div>
+        <div class="cb">r = |vina_score| / 16 clamped [0,1]<br>Ground-truth reward<br>Run every 10 RL rounds<br>Strongest signal</div>
+      </div>
+      <div class="cell">
+        <div class="ctt" style="color:var(--amber)">r_qed (w₂=0.20)</div>
+        <div class="cb">RDKit QED in [0,1]<br>Drug-likeness proxy<br>Target: QED > 0.5<br>Fast, every round</div>
+      </div>
+      <div class="cell">
+        <div class="ctt" style="color:var(--amber)">r_sa (w₃=0.15)</div>
+        <div class="cb">r = 1 − SA/10<br>Synthesizability<br>Target: SA < 4.0<br>Penalise exotic rings</div>
+      </div>
+      <div class="cell">
+        <div class="ctt" style="color:var(--amber)">r_lipinski (w₄=0.10)</div>
+        <div class="cb">Binary 0/1 per rule<br>MW≤500, HBD≤5<br>HBA≤10, logP≤5<br>Hard constraint gate</div>
+      </div>
+      <div class="cell">
+        <div class="ctt" style="color:var(--amber)">r_proxy (w₅=0.15)</div>
+        <div class="cb">Value head pK_pred<br>Cheap differentiable<br>Used every RL step<br>Aligned to Vina during pretrain</div>
+      </div>
+      <div class="cell">
+        <div class="ctt" style="color:var(--amber)">Contrastive bonus</div>
+        <div class="cb">+0.1 if generated mol beats best known ligand for that pocket in dataset<br>Encourages surpassing training set</div>
+      </div>
+    </div>
+    <div class="warn">⚠ Dataset insight: 1,680 proteins have intra-protein affinity spread > 5 kcal/mol · use these as contrastive training pairs (same pocket, different ligands) · provides relative ranking signal beyond absolute Vina score</div>
+  </div>
+</div>
+
+<div class="arr"><div class="arl"></div><div class="arh"></div></div>
+
+<!-- ── SECTION 6: RL TRAINING ── -->
+<div class="sec">
+  <div class="sec-lbl">06 — RL Fine-Tuning: DDPO Policy Gradient <span class="badge bk">core novelty vs both papers</span></div>
+  <div class="card coral">
+    <div class="ct">DDPO — Denoising Diffusion Policy Optimization through the full flow chain</div>
+    <div class="cs">Both DiffSBDD and TargetDiff never backprop through affinity · DDPO does · this is the primary architectural advantage</div>
+    <div class="g2">
+      <div>
+        <div class="ctt" style="color:var(--coral);margin-bottom:4px">DDPO objective</div>
+        <div class="math">// Treat flow chain as T-step MDP
+// State s_t = (z_t, pocket)
+// Action a_t = v_θ(z_t, t, P)·Δt  [denoising step]
+// Reward R given at final step t=1
+
+J(θ) = E_{m~p_θ}[ R(m, pocket) ]
+     - β · KL(p_θ || p_{θ_0})  [stay near pretrain]
+
+// Policy gradient:
+∇_θ J = E[ Σ_t ∇_θ log p_θ(z_{t+1}|z_t, P) · R ]
+
+// KL penalty prevents mode collapse:
+// β annealed 0.01 → 0.001 over RL training</div>
+      </div>
+      <div>
+        <div class="ctt" style="color:var(--coral);margin-bottom:4px">Training loop</div>
+        <div class="math">for each RL round:
+  1. Sample B=32 pockets from RL subset
+  2. Generate 100 molecules per pocket
+     (50-step flow, no_grad for speed)
+  3. Score all with R(m, pocket)
+     - proxy r_proxy: every round (fast)
+     - Vina r_vina: every 10 rounds (slow)
+  4. Select top-10 per pocket as seeds
+  5. Re-run with grad tracking
+  6. Compute DDPO loss + KL penalty
+  7. Update θ with Adam lr=1e-5
+  8. Curriculum: increase pocket difficulty
+     every 500 rounds</div>
+      </div>
+    </div>
+    <div class="cells mt">
+      <div class="cell"><div class="ctt">KL regularisation</div><div class="cb">L = L_RL − β·KL(θ||θ₀) · prevents hallucination · keeps chemistry in drug-like space · β annealed</div></div>
+      <div class="cell"><div class="ctt">Curriculum</div><div class="cb">Start easy pockets (mean affinity −7) → hard (−11) · pocket difficulty = mean affinity of known ligands</div></div>
+      <div class="cell"><div class="ctt">Batch strategy</div><div class="cb">Mix CrossDocked + PDBbind + HiQBind · weight PDBbind 2× later in training (cleaner affinities)</div></div>
+      <div class="cell"><div class="ctt">Inpainting RL</div><div class="cb">Also RL-finetune inpainting: fix scaffold, optimize functional groups toward reward · same θ, different mask</div></div>
+    </div>
+    <div class="fb">↺ Gradient flows: reward oracle → DDPO loss → ∇θ log p → all 9 EGNN layers + cross-attention + flow velocity head · This loop is absent in DiffSBDD and TargetDiff</div>
+  </div>
+</div>
+
+<div class="arr"><div class="arl"></div><div class="arh"></div></div>
+
+<!-- ── SECTION 7: TRAINING RECIPE ── -->
+<div class="sec">
+  <div class="sec-lbl">07 — Full Training Recipe</div>
+  <div class="card gray">
+    <div class="ct" style="color:var(--bright)">Two-phase training on 64,759 pairs</div>
+    <div class="g2">
+      <div>
+        <div class="ctt" style="color:var(--teal);margin-bottom:4px">Phase A — Pretraining (200K steps)</div>
+        <div class="math">Dataset: all 64,759 pairs (clip affinities [−16,0])
+Split: protein-level 80/10/10
+Loss: L_flow + λ·L_affinity_head
+  L_flow = E[||v_θ − u_t||²]  (flow matching)
+  L_affinity = MSE(pK_pred, |vina|/16)
+  λ = 0.1 (balance generative vs critic)
+Optimizer: AdamW lr=3e-4, β=(0.9,0.999)
+Batch: 4 complexes (memory: ~16GB)
+Affinity weighting: w_i = softmax(|aff_i|/2)
+Hardware: 1× A100 80GB, ~36h</div>
+      </div>
+      <div>
+        <div class="ctt" style="color:var(--coral);margin-bottom:4px">Phase B — RL Fine-tuning (50K steps)</div>
+        <div class="math">Dataset: top-10% affinity pockets (~5,600 pairs)
+          + full CrossDocked for diversity
+Loss: L_DDPO = −E[log p(m|P)·R(m,P)]
+            + β·KL(θ||θ_0)
+Optimizer: Adam lr=1e-5 (10× smaller)
+Generate: 100 mols/pocket, keep top-10
+Vina oracle: every 10 rounds
+Proxy oracle: every round
+β schedule: 0.01 → 0.001 (cosine anneal)
+Hardware: 1× A100 80GB, ~12h additional</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="arr"><div class="arl"></div><div class="arh"></div></div>
+
+<!-- ── SECTION 8: INFERENCE ── -->
+<div class="sec">
+  <div class="sec-lbl">08 — Inference Modes</div>
+  <div class="card green">
+    <div class="ct">pocket.pdb → ligand.sdf · All modes from single model θ</div>
+    <div class="g4">
+      <div class="cell"><div class="ctt">De novo</div><div class="cb">Sample N_L from pocket-size prior · 50-step reverse flow from N(0,I) · OpenBabel bond inference</div></div>
+      <div class="cell"><div class="ctt">Inpainting</div><div class="cb">Fix scaffold/fragment via mask · replacement method + r=10 resamplings · no retraining needed</div></div>
+      <div class="cell"><div class="ctt">Scaffold hop</div><div class="cb">Fix functional groups · redesign topology · DiffSBDD-diversify: partial noise t=200 steps</div></div>
+      <div class="cell"><div class="ctt">Fragment grow</div><div class="cb">Fix core motif · grow outward in pocket context · binary mask over fixed atoms</div></div>
+    </div>
+    <div class="ok mt">✓ 50-step flow matching inference · 20× faster than DDPM baseline · all modes from one checkpoint · no task-specific retraining</div>
+  </div>
+</div>
+
+<div class="arr"><div class="arl"></div><div class="arh"></div></div>
+
+<!-- ── SECTION 9: COMPARISON ── -->
+<div class="sec">
+  <div class="sec-lbl">09 — Architecture Comparison</div>
+  <div class="card gray">
+    <div class="ct" style="color:var(--bright)">This Architecture vs DiffSBDD vs TargetDiff</div>
+    <table class="tbl">
+      <tr><th>Dimension</th><th>DiffSBDD (Nature 2024)</th><th>TargetDiff (ICLR 2023)</th><th class="ours">This Architecture</th></tr>
+      <tr>
+        <td>Backbone</td>
+        <td class="bad">DDPM · 1000 steps · slow sampling</td>
+        <td class="bad">DDPM · 1000 steps · 3428s/100 mols</td>
+        <td class="good ours">Flow Matching · 50 steps · ~170s/100 mols</td>
+      </tr>
+      <tr>
+        <td>Pocket conditioning</td>
+        <td class="bad">Append pocket nodes to ligand graph</td>
+        <td class="bad">k-NN edges between ligand+pocket atoms</td>
+        <td class="good ours">Cross-attention at every EGNN layer · tighter gating</td>
+      </tr>
+      <tr>
+        <td>Affinity during training</td>
+        <td class="bad">Not used in training at all</td>
+        <td class="bad">Passive head for post-hoc ranking only</td>
+        <td class="good ours">Jointly trained value head + RL policy gradient</td>
+      </tr>
+      <tr>
+        <td>RL / optimization</td>
+        <td class="bad">Evolutionary search (noising/denoising) · no backprop through affinity</td>
+        <td class="bad">None · generation then re-rank</td>
+        <td class="good ours">DDPO policy gradient through full denoising chain</td>
+      </tr>
+      <tr>
+        <td>Equivariance</td>
+        <td>SE(3) · reflection-sensitive ✓</td>
+        <td class="bad">SE(3) but no reflection sensitivity</td>
+        <td class="good ours">SE(3) · reflection-sensitive · stereochemistry-aware</td>
+      </tr>
+      <tr>
+        <td>Dataset</td>
+        <td>CrossDocked 100K + Binding MOAD 40K</td>
+        <td>CrossDocked 100K (filtered to 100K)</td>
+        <td class="good ours">64,759 all-Vina-labeled pairs · 4 sub-datasets · consistent scale</td>
+      </tr>
+      <tr>
+        <td>QED / SA known weakness</td>
+        <td>Moderate (not optimised for these)</td>
+        <td class="bad">Explicitly worse than Pocket2Mol on QED+SA</td>
+        <td class="good ours">Multi-objective reward includes QED + SA directly</td>
+      </tr>
+      <tr>
+        <td>Log p tractability</td>
+        <td class="bad">DDPM curved paths · approximate</td>
+        <td class="bad">DDPM · required for RL but not used</td>
+        <td class="good ours">Flow ODE · exact via instantaneous change-of-variables</td>
+      </tr>
+      <tr>
+        <td>Multi-task (scaffold/fragment)</td>
+        <td>✓ Inpainting + resampling</td>
+        <td class="bad">De novo only · no inpainting</td>
+        <td class="good ours">All modes from single model · RL also fine-tunes inpainting</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+<!-- ── SECTION 10: IMPLEMENTATION CHECKLIST ── -->
+<div class="sec">
+  <div class="sec-lbl">10 — Implementation Checklist</div>
+  <div class="g2">
+    <div class="card teal">
+      <div class="ct">Data pipeline</div>
+      <div class="cb" style="color:var(--text)">
+        ☐ Parse .pdb pockets with BioPython · map atom features<br>
+        ☐ Parse .mol2 pockets with RDKit (scPDB subset)<br>
+        ☐ Parse .sdf ligands with RDKit · extract atom types<br>
+        ☐ Clip affinities to [−16, 0] · remove 93 outliers<br>
+        ☐ Protein-level 80/10/10 split (no leakage)<br>
+        ☐ Define pocket as residues within 8Å of any ligand atom<br>
+        ☐ Precompute affinity weights w_i = softmax(|aff|/2)<br>
+        ☐ Build contrastive pairs from 1,680 high-spread proteins<br>
+        ☐ Normalize reward r = |affinity|/16 ∈ [0,1]
+      </div>
+    </div>
+    <div class="card purple">
+      <div class="ct">Model implementation</div>
+      <div class="cb" style="color:var(--text)">
+        ☐ Pocket encoder: 4-layer EGNN, k=16 k-NN, hidden=128<br>
+        ☐ Cross-attention module: Q from ligand h, K/V from h_P<br>
+        ☐ 9 EGNN layers with cross-attention at each<br>
+        ☐ SE(3) coord update with cross-product reflection term<br>
+        ☐ Flow matching velocity head (continuous + categorical)<br>
+        ☐ Affinity value head: MeanPool → 2-layer MLP → scalar<br>
+        ☐ Zero CoM of protein before every forward pass<br>
+        ☐ Molecule size: sample N_L from pocket-conditioned prior<br>
+        ☐ Postprocess: OpenBabel bonds → RDKit sanitize
+      </div>
+    </div>
+    <div class="card amber">
+      <div class="ct">Pretraining</div>
+      <div class="cb" style="color:var(--text)">
+        ☐ AdamW lr=3e-4, batch=4, gradient clip=8<br>
+        ☐ Affinity-weighted flow matching loss<br>
+        ☐ Joint MSE loss on value head (λ=0.1)<br>
+        ☐ Polynomial noise schedule (clipped for stability)<br>
+        ☐ 200K steps, eval every 2K steps<br>
+        ☐ Monitor val: Vina score, QED, SA, affinity MSE<br>
+        ☐ Save checkpoint θ₀ (frozen reference for RL KL penalty)
+      </div>
+    </div>
+    <div class="card coral">
+      <div class="ct">RL Fine-tuning</div>
+      <div class="cb" style="color:var(--text)">
+        ☐ Load θ₀ pretrained checkpoint<br>
+        ☐ Adam lr=1e-5 (10× smaller than pretraining)<br>
+        ☐ Generate 100 mols/pocket, keep top-10<br>
+        ☐ Compute R = w1·r_vina + w2·r_qed + w3·r_sa + w4·r_lip + w5·r_proxy<br>
+        ☐ DDPO policy gradient ∇θ log p(m|P)·R<br>
+        ☐ KL penalty β cosine annealed 0.01→0.001<br>
+        ☐ Vina oracle every 10 rounds (batch on GPU)<br>
+        ☐ Curriculum: easy→hard pockets every 500 rounds<br>
+        ☐ 50K RL steps total (~12h on A100)
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:32px;padding-top:16px;border-top:1px solid var(--border);text-align:center;color:var(--dim);font-size:10px">
+  RL-Guided Flow Diffusion SBDD · Based on final_dataset.json (64,759 pairs · 13,275 proteins) · Designed to surpass DiffSBDD (Nature 2024) + TargetDiff (ICLR 2023)
+</div>
+
+</body>
+</html>

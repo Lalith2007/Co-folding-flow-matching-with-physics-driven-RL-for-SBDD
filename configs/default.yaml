@@ -1,0 +1,118 @@
+# ──────────────────────────────────────────────────────────────
+# RL-Guided Flow Diffusion SBDD — Default Configuration
+# ──────────────────────────────────────────────────────────────
+
+# ── Paths ──
+data:
+  dataset_json: "final_dataset.json"
+  # Base directory on the server where pocket/ligand files reside.
+  # The paths in final_dataset.json (e.g. "crossdocked/...") are
+  # relative to this directory.
+  base_dir: "/home/jovyan/dd_pipeline/datasets"
+
+# ── Affinity filtering ──
+affinity:
+  min: -13.0          # kcal/mol — lower bound
+  max: -6.0           # kcal/mol — upper bound
+  # Reward normalisation: r = (|aff| - offset) / scale
+  # Maps [-13, -6] → [1, 0]  (strong binders get reward 1)
+  reward_offset: 6.0
+  reward_scale: 7.0
+
+# ── Train / Val / Test split (protein-level) ──
+split:
+  train_frac: 0.80
+  val_frac: 0.10
+  test_frac: 0.10
+  seed: 42
+
+# ── RL curriculum ──
+curriculum:
+  rl_top_percentile: 0.10    # top 10 % strongest binders
+  rl_threshold: -11.0        # approximate affinity cutoff
+
+# ── Pocket featurisation ──
+pocket:
+  cutoff_angstrom: 8.0       # pocket = residues within 8 Å of ligand
+  knn_k: 16                  # k-nearest-neighbour graph
+  element_dim: 15            # one-hot for elements
+  aa_dim: 21                 # 20 standard + UNK
+  hidden_dim: 128
+
+# ── Ligand featurisation ──
+ligand:
+  atom_types:                # 10 atom types for categorical flow
+    - C
+    - N
+    - O
+    - S
+    - F
+    - Cl
+    - Br
+    - P
+    - I
+    - B
+  num_atom_types: 10
+
+# ── Pocket Encoder ──
+pocket_encoder:
+  num_layers: 4
+  hidden_dim: 128
+
+# ── Core SE(3)-EGNN ──
+egnn:
+  num_layers: 9
+  hidden_dim: 128
+  num_heads: 16
+  dropout: 0.0
+
+# ── Flow Matching ──
+flow:
+  num_steps_train: 1000      # continuous t sampled in [0,1]
+  num_steps_sample: 50       # Euler steps for generation
+  sigma_min: 1.0e-5
+
+# ── Affinity value head ──
+value_head:
+  hidden_dim: 128
+  num_layers: 2
+
+# ── Multi-objective reward ──
+reward:
+  w_vina: 0.40
+  w_qed: 0.20
+  w_sa: 0.15
+  w_lipinski: 0.10
+  w_proxy: 0.15
+  contrastive_bonus: 0.10
+  vina_every_n: 10           # Vina oracle called every N RL rounds
+
+# ── Phase A: Pretraining ──
+pretrain:
+  max_steps: 200000
+  batch_size: 32
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  betas: [0.9, 0.999]
+  grad_clip: 8.0
+  affinity_loss_lambda: 0.1  # balance generative vs critic
+  affinity_temp: 2.0         # temperature for softmax weighting
+  eval_every: 2000
+  save_every: 10000
+
+# ── Phase B: RL Fine-tuning (DDPO) ──
+rl:
+  max_steps: 50000
+  lr: 1.0e-5
+  batch_pockets: 32          # pockets per RL round
+  mols_per_pocket: 100       # generate per pocket
+  top_k: 10                  # keep top-k for gradient
+  kl_beta_start: 0.01
+  kl_beta_end: 0.001
+  kl_anneal: "cosine"
+
+# ── Hardware ──
+hardware:
+  device: "cuda"
+  num_workers: 8
+  pin_memory: true
