@@ -74,6 +74,10 @@ class FlowMatching(nn.Module):
     ) -> dict:
         """Compute the noised state z_t and the target velocity u_t.
 
+        Convention: t=0 → noise, t=1 → data.
+        This matches the inference loop which integrates from t=0 to t=1
+        starting from pure noise.
+
         Returns dict with z_t_coord, z_t_type, u_t_coord, u_t_type.
         """
         N_L = x_data.size(0)
@@ -83,17 +87,18 @@ class FlowMatching(nn.Module):
         # Subtract CoM from noise
         z_noise_coord = z_noise_coord - z_noise_coord.mean(dim=0, keepdim=True)
 
-        z_t_coord = (1 - t) * x_data + t * z_noise_coord
-        u_t_coord = z_noise_coord - x_data  # target velocity
+        # t=0 → noise, t=1 → data
+        z_t_coord = (1 - t) * z_noise_coord + t * x_data
+        u_t_coord = x_data - z_noise_coord  # target velocity: noise → data
 
         # ── Categorical atom type flow ──
         # One-hot ground truth
         type_onehot = F.one_hot(type_data, num_atom_types).float()
         # Uniform noise
         uniform = torch.ones_like(type_onehot) / num_atom_types
-        # Interpolate
-        z_t_type = (1 - t) * type_onehot + t * uniform
-        u_t_type = uniform - type_onehot  # target velocity
+        # Interpolate: t=0 → uniform, t=1 → one-hot
+        z_t_type = (1 - t) * uniform + t * type_onehot
+        u_t_type = type_onehot - uniform  # target velocity: noise → data
 
         return {
             "z_t_coord": z_t_coord,
@@ -109,39 +114,66 @@ class FlowMatching(nn.Module):
 
     def compute_loss(
         self,
-        pocket_pos: torch.Tensor,      # (N_P, 3)
-        pocket_feat: torch.Tensor,     # (N_P, F_P)
-        ligand_pos: torch.Tensor,      # (N_L, 3)
-        ligand_feat: torch.Tensor,     # (N_L, F_L)
-        ligand_atom_types: torch.Tensor,  # (N_L,) int
-        affinity: torch.Tensor,        # scalar — ground-truth affinity
-        weight: torch.Tensor = None,   # scalar — sample weight
+        pocket_pos: torch.Tensor,      # (sum N_P, 3)
+        pocket_feat: torch.Tensor,     # (sum N_P, F_P)
+        ligand_pos: torch.Tensor,      # (sum N_L, 3)
+        ligand_feat: torch.Tensor,     # (sum N_L, F_L)
+        ligand_atom_types: torch.Tensor,  # (sum N_L,) int
+        affinity: torch.Tensor,        # (B,) or scalar
+        weight: torch.Tensor = None,   # (B,) or scalar
         affinity_lambda: float = 0.1,
         reward_offset: float = 6.0,
         reward_scale: float = 7.0,
+        type_loss_weight: float = 5.0,
+        ligand_bonds: torch.Tensor = None,  # (sum N_L, sum N_L, 4)
+        bond_dropout: float = 0.5,
+        batch_P: torch.Tensor = None,  # (sum N_P,) graph assignment
+        batch_L: torch.Tensor = None,  # (sum N_L,) graph assignment
     ) -> dict:
         """Compute the flow matching loss + affinity head loss.
 
+        Supports both single-sample and batched disjoint union inputs.
         Returns dict with total_loss, flow_loss, affinity_loss.
+
+        The ``type_loss_weight`` upweights the atom-type velocity loss
+        relative to coordinate velocity loss. Without this, the model
+        ignores the categorical flow and always predicts Carbon.
         """
         device = pocket_pos.device
 
-        # Subtract CoM of pocket coords
-        pocket_pos = subtract_com(pocket_pos)
-        ligand_pos = subtract_com(ligand_pos)
+        # Sanitize inputs: replace NaN/Inf from malformed data files
+        pocket_pos = torch.nan_to_num(pocket_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        pocket_feat = torch.nan_to_num(pocket_feat, nan=0.0, posinf=0.0, neginf=0.0)
+        ligand_pos = torch.nan_to_num(ligand_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        ligand_feat = torch.nan_to_num(ligand_feat, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Encode pocket
-        pocket_out = self.pocket_encoder(pocket_pos, pocket_feat)
-        h_P = pocket_out["h_P"]
+        # Subtract CoM (per-graph if batched)
+        pocket_pos = subtract_com(pocket_pos, batch_P)
+        ligand_pos = subtract_com(ligand_pos, batch_L)
 
         # Sample random time
         t = torch.rand(1, device=device).clamp(min=self.sigma_min, max=1.0 - self.sigma_min)
+
+        # ── Pocket Flexibility (Induced Fit) ──
+        # Noise the pocket coordinates slightly to learn co-folding
+        z_noise_pocket = torch.randn_like(pocket_pos)
+        z_t_pocket = (1 - t) * z_noise_pocket + t * pocket_pos
+        u_t_pocket = pocket_pos - z_noise_pocket
+
+        # Encode pocket with noised coordinates
+        pocket_out = self.pocket_encoder(z_t_pocket, pocket_feat, batch_P=batch_P)
+        h_P = pocket_out["h_P"]
 
         # Forward interpolation
         interp = self.forward_interpolation(
             ligand_pos, ligand_atom_types, t,
             num_atom_types=self.egnn.num_atom_types,
         )
+
+        # Bond Dropout: randomly zero-out bond features to prevent
+        # OOD collapse at inference (where bonds are always unknown)
+        if self.training and ligand_bonds is not None and torch.rand(1).item() < bond_dropout:
+            ligand_bonds = torch.zeros_like(ligand_bonds)
 
         # Predict velocity
         model_out = self.egnn(
@@ -150,27 +182,33 @@ class FlowMatching(nn.Module):
             atom_types_onehot=interp["z_t_type"],
             t=t,
             h_P=h_P,
+            ligand_bonds=ligand_bonds,
+            batch_L=batch_L,
+            batch_P=batch_P,
         )
 
         # ── Flow matching loss ──
+        # Upweight type loss so the model actually learns atom type
+        # discrimination instead of collapsing to always-Carbon.
         loss_coord = F.mse_loss(model_out["vel_coord"], interp["u_t_coord"])
         loss_type = F.mse_loss(model_out["vel_type"], interp["u_t_type"])
-        flow_loss = loss_coord + loss_type
+        loss_pocket_coord = F.mse_loss(model_out["vel_pocket"], u_t_pocket)
+        
+        flow_loss = loss_coord + type_loss_weight * loss_type + loss_pocket_coord
 
         # ── Affinity head loss ──
         # Target: normalised reward r = (|aff| - offset) / scale
-        target_reward = (abs(affinity.item()) - reward_offset) / reward_scale
-        target_reward = torch.tensor(target_reward, device=device)
-        affinity_loss = F.mse_loss(
-            torch.sigmoid(model_out["pK_pred"]), target_reward
-        )
+        if affinity.dim() == 0:
+            target_reward = (abs(affinity.item()) - reward_offset) / reward_scale
+            target_reward = torch.tensor(target_reward, device=device)
+        else:
+            target_reward = (affinity.abs() - reward_offset) / reward_scale
+
+        pK_pred = model_out["pK_pred"]
+        affinity_loss = F.mse_loss(torch.sigmoid(pK_pred), target_reward)
 
         # Total loss
         total_loss = flow_loss + affinity_lambda * affinity_loss
-
-        # Apply sample weight
-        if weight is not None:
-            total_loss = total_loss * weight
 
         return {
             "total_loss": total_loss,
@@ -194,6 +232,8 @@ class FlowMatching(nn.Module):
         ligand_types_b: torch.Tensor,   # (N_B,) int
         affinity_b: float,              # weaker (less negative)
         margin: float = 1.0,
+        ligand_bonds_a: torch.Tensor = None,  # (N_A, N_A, 4)
+        ligand_bonds_b: torch.Tensor = None,  # (N_B, N_B, 4)
     ) -> torch.Tensor:
         """Contrastive ranking loss for same-pocket ligand pairs.
 
@@ -219,6 +259,7 @@ class FlowMatching(nn.Module):
         out_a = self.egnn(
             x_L=interp_a["z_t_coord"], h_L_raw=ligand_feat_a,
             atom_types_onehot=interp_a["z_t_type"], t=t, h_P=h_P,
+            ligand_bonds=ligand_bonds_a,
         )
 
         # Forward pass for ligand B
@@ -229,6 +270,7 @@ class FlowMatching(nn.Module):
         out_b = self.egnn(
             x_L=interp_b["z_t_coord"], h_L_raw=ligand_feat_b,
             atom_types_onehot=interp_b["z_t_type"], t=t, h_P=h_P,
+            ligand_bonds=ligand_bonds_b,
         )
 
         # MarginRankingLoss: pK_pred(A) should be > pK_pred(B)
@@ -271,8 +313,7 @@ class FlowMatching(nn.Module):
 
         # Predict number of ligand atoms if not given
         if num_atoms is None:
-            size_pred = self.size_predictor(pocket_out["h_glob"])
-            num_atoms = max(int(size_pred.item() + 0.5), 4)  # at least 4 atoms
+            num_atoms = int(torch.randint(20, 35, (1,)).item())
 
         N_L = num_atoms
 
@@ -296,16 +337,19 @@ class FlowMatching(nn.Module):
                 atom_types_onehot=z_type,
                 t=t,
                 h_P=h_P,
+                ligand_bonds=None,  # no bond info at inference time
             )
 
             # Euler step
             z_coord = z_coord + out["vel_coord"] * dt
             z_type = z_type + out["vel_type"] * dt
+            pocket_pos = pocket_pos + out["vel_pocket"] * dt
 
-            # Re-centre CoM
+            # Re-centre CoM of ligand (optional but good practice)
             z_coord = z_coord - z_coord.mean(dim=0, keepdim=True)
 
-        # Decode atom types from final type vector
+        # Decode atom types — clean argmax (no inference hacks needed
+        # after proper retraining with type_loss_weight=5.0)
         atom_types = z_type.argmax(dim=-1)  # (N_L,)
 
         # Get final affinity prediction
@@ -317,4 +361,5 @@ class FlowMatching(nn.Module):
             "type_probs": F.softmax(z_type, dim=-1),
             "pK_pred": pK_pred,
             "num_atoms": N_L,
+            "pocket_pos_updated": pocket_pos.detach(),
         }

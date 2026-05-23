@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # ── Atom type index → element symbol mapping ──
 # Must match LIGAND_ATOM_TYPES in featurizer.py
-IDX_TO_ELEMENT = ["C", "N", "O", "S", "F", "Cl", "Br", "P", "I", "B"]
+IDX_TO_ELEMENT = ["C", "N", "O", "S", "F", "Cl"]
 
 
 def coords_to_smiles(

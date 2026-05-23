@@ -8,6 +8,28 @@ import torch
 import torch.nn as nn
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Batched graph utilities
+# ──────────────────────────────────────────────────────────────────────────────
+
+def scatter_mean(
+    src: torch.Tensor,    # (N, D)
+    index: torch.Tensor,  # (N,) long — batch assignment per node
+    dim_size: int,        # number of graphs in batch
+) -> torch.Tensor:
+    """Compute per-graph mean pooling via scatter.
+
+    Returns
+    -------
+    out : (dim_size, D) — mean of src for each graph
+    """
+    out = torch.zeros(dim_size, src.size(-1), device=src.device, dtype=src.dtype)
+    count = torch.zeros(dim_size, 1, device=src.device, dtype=src.dtype)
+    out.index_add_(0, index, src)
+    count.index_add_(0, index, torch.ones(src.size(0), 1, device=src.device, dtype=src.dtype))
+    return out / count.clamp(min=1)
+
+
 def subtract_com(
     pos: torch.Tensor,          # (N, 3)
     batch: torch.Tensor = None,  # (N,) optional batch indices
@@ -19,13 +41,10 @@ def subtract_com(
     if batch is None:
         return pos - pos.mean(dim=0, keepdim=True)
 
-    # Per-graph CoM
-    unique_batches = batch.unique()
-    centred = pos.clone()
-    for b in unique_batches:
-        mask = batch == b
-        centred[mask] -= pos[mask].mean(dim=0, keepdim=True)
-    return centred
+    # Per-graph CoM via scatter
+    B = batch.max().item() + 1
+    com = scatter_mean(pos, batch, B)   # (B, 3)
+    return pos - com[batch]             # broadcast subtract
 
 
 def pairwise_distances(pos: torch.Tensor) -> torch.Tensor:

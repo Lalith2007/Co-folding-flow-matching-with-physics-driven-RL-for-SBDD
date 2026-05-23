@@ -80,7 +80,7 @@ def rl_finetune(
     # Load pretrained model as frozen reference (θ₀) for KL penalty
     model_ref = copy.deepcopy(model)
     ckpt = torch.load(pretrained_checkpoint, map_location=device)
-    model_ref.load_state_dict(ckpt["model_state_dict"])
+    model_ref.load_state_dict(ckpt["model_state_dict"], strict=False)
     model_ref = model_ref.to(device)
     model_ref.eval()
     for p in model_ref.parameters():
@@ -94,8 +94,15 @@ def rl_finetune(
     # KL β schedule
     beta_schedule = CosineBetaSchedule(kl_beta_start, kl_beta_end, max_steps)
 
-    # Reward oracle
-    reward_oracle = RewardOracle(vina_every_n=vina_every_n)
+    # Reward oracle — pharma-grade safety gates
+    reward_oracle = RewardOracle(
+        vina_every_n=vina_every_n,
+        min_carbon_ratio=0.40,
+        max_nitrogen_ratio=0.35,
+        max_nn_bonds=2,
+        max_sa_score=6.0,
+        max_ring_nitrogen=2,
+    )
 
     # RL curriculum: start with easy pockets, increase difficulty
     rl_pairs = get_rl_subset(train_pairs, threshold=-11.0)
@@ -111,6 +118,14 @@ def rl_finetune(
         f"Starting RL fine-tuning: {max_steps} steps, lr={lr}, "
         f"β={kl_beta_start}→{kl_beta_end}"
     )
+
+    from tqdm import tqdm
+    pbar = tqdm(total=max_steps, initial=0, desc="RL Phase B")
+
+    # Need featurizer to load pocket data on the fly
+    from ..data.featurizer import PocketFeaturizer
+    pocket_featurizer = PocketFeaturizer()
+    base_dir_path = Path(base_dir)
 
     while step < max_steps:
         optimizer.zero_grad()
@@ -138,15 +153,16 @@ def rl_finetune(
         n_mols = 0
 
         for pair in pocket_sample:
-            pocket_pos = pair.get("_pocket_pos")
-            pocket_feat = pair.get("_pocket_feat")
-
-            # Skip if pocket data not preloaded (would need featurizer)
-            if pocket_pos is None:
+            # Load pocket data on the fly
+            pocket_path = base_dir_path / pair["pocket_path"]
+            try:
+                pocket_data = pocket_featurizer.featurize(str(pocket_path))
+                if pocket_data["pos"] is None or pocket_data["pos"].shape[0] == 0:
+                    continue
+                pocket_pos = pocket_data["pos"].to(device)
+                pocket_feat = pocket_data["feat"].to(device)
+            except Exception:
                 continue
-
-            pocket_pos = pocket_pos.to(device)
-            pocket_feat = pocket_feat.to(device)
 
             # ── Step 1: Generate molecules (no grad for speed) ──
             with torch.no_grad():
@@ -155,11 +171,50 @@ def rl_finetune(
                     gen = model.sample(pocket_pos, pocket_feat)
                     candidates.append(gen)
 
-            # ── Step 2: Score with reward oracle ──
+            # ── Step 2: Score with FULL multi-objective reward ──
+            # This prevents reward hacking: the model can't maximize
+            # proxy affinity at the expense of drug-likeness.
             rewards = []
             for gen in candidates:
-                # For now, use proxy reward
-                r = reward_oracle.compute_proxy_reward(gen["pK_pred"])
+                # Reconstruct RDKit molecule for chemical metrics
+                try:
+                    from rdkit import Chem
+                    from rdkit.Geometry import Point3D
+                    from ..data.featurizer import LIGAND_ATOM_TYPES
+
+                    pos_np = gen["pos"].cpu().numpy()
+                    types_np = gen["atom_types"].cpu().numpy()
+
+                    mol = Chem.RWMol()
+                    conf = Chem.Conformer(len(pos_np))
+                    for i, (p, t) in enumerate(zip(pos_np, types_np)):
+                        elem = LIGAND_ATOM_TYPES[t] if t < len(LIGAND_ATOM_TYPES) else "C"
+                        atom_num = Chem.GetPeriodicTable().GetAtomicNumber(elem)
+                        mol.AddAtom(Chem.Atom(atom_num))
+                        conf.SetAtomPosition(i, Point3D(float(p[0]), float(p[1]), float(p[2])))
+                    mol.AddConformer(conf, assignId=True)
+
+                    try:
+                        from rdkit.Chem import rdDetermineBonds
+                        rdDetermineBonds.DetermineBonds(mol.GetMol())
+                        mol = Chem.RWMol(mol.GetMol())
+                    except Exception:
+                        pass
+
+                    Chem.SanitizeMol(mol)
+                    reward_dict = reward_oracle.compute_rl_reward(
+                        mol=mol.GetMol(),
+                        pK_pred=gen["pK_pred"],
+                        pocket_path=str(pocket_path),
+                        pocket_pos_updated=gen.get("pocket_pos_updated"),
+                        rl_round=step,
+                    )
+                    r = reward_dict["total_reward"]
+                except Exception:
+                    # Hard penalty for molecules that can't be reconstructed
+                    # (prevents reward hacking with invalid chemistry)
+                    # MUST BE >= 0.0 to prevent unbaselined REINFORCE from exploding
+                    r = 0.0
                 rewards.append(r)
 
             # ── Step 3: Select top-k ──
@@ -184,10 +239,12 @@ def rl_finetune(
                 ) / model.egnn.num_atom_types
                 h_L_raw = torch.zeros(N_L, 20, device=device)
 
-                dt = 1.0 / model.num_steps
+                # Use fewer ODE steps for RL (20 vs 50) — faster, still good enough
+                rl_num_steps = 20
+                dt = 1.0 / rl_num_steps
                 log_prob = torch.tensor(0.0, device=device)
 
-                for s in range(model.num_steps):
+                for s in range(rl_num_steps):
                     t_val = s * dt
                     t = torch.tensor([t_val], device=device)
 
@@ -216,8 +273,9 @@ def rl_finetune(
                 # Normalise to [0, 1]: max entropy = log(10) ≈ 2.3
                 import math
                 r_entropy = max(0.0, 1.0 - entropy.item() / math.log(model.egnn.num_atom_types))
-                # Add entropy to reward (weighted 0.1)
-                r = r + 0.1 * r_entropy
+                # Add entropy to reward (weighted 0.1) — only for valid molecules
+                if r > 0:
+                    r = r + 0.1 * r_entropy
 
                 # ── KL penalty against θ₀ ──
                 with torch.no_grad():
@@ -264,6 +322,7 @@ def rl_finetune(
             optimizer.step()
 
         step += 1
+        pbar.update(1)
 
         # ── Logging ──
         if step % 10 == 0 and n_mols > 0:
@@ -271,6 +330,12 @@ def rl_finetune(
             avg_rl = total_rl_loss / n_mols
             avg_kl = total_kl_loss / n_mols
             elapsed = time.time() - t_start
+
+            pbar.set_postfix({
+                "R": f"{avg_r:.3f}",
+                "rl": f"{avg_rl:.4f}",
+                "kl": f"{avg_kl:.4f}"
+            })
 
             logger.info(
                 f"RL Step {step}/{max_steps} | "
@@ -307,5 +372,6 @@ def rl_finetune(
         "model_state_dict": model.state_dict(),
     }, final_path)
     logger.info(f"RL fine-tuning complete. Final checkpoint: {final_path}")
+    pbar.close()
 
     return model

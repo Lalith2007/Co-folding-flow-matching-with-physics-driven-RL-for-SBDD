@@ -35,8 +35,9 @@ def pretrain(
     lr: float = 3e-4,
     weight_decay: float = 1e-2,
     betas: tuple = (0.9, 0.999),
-    grad_clip: float = 8.0,
+    grad_clip: float = 1.0,
     affinity_lambda: float = 0.1,
+    type_loss_weight: float = 5.0,
     eval_every: int = 2000,
     save_every: int = 10000,
     save_dir: str = "checkpoints",
@@ -75,12 +76,17 @@ def pretrain(
     if optimizer_state is not None:
         optimizer.load_state_dict(optimizer_state)
 
-    # Custom collate — each sample has variable-size tensors
-    # For simplicity we process one complex at a time (batch_size=1 effective)
-    # and accumulate gradients over `batch_size` samples.
+    # Mixed precision: bf16 on A100 for ~2x speedup
+    use_amp = device == "cuda" and torch.cuda.is_bf16_supported()
+    amp_dtype = torch.bfloat16 if use_amp else torch.float16
+    scaler = torch.amp.GradScaler(enabled=use_amp and amp_dtype == torch.float16)
+    if use_amp:
+        logger.info(f"Mixed precision enabled: {amp_dtype}")
+
+    # Disjoint union collation — DataLoader handles true batching now
     train_loader = DataLoader(
-        train_dataset, batch_size=1, shuffle=True, num_workers=4,
-        pin_memory=True, collate_fn=collate_skip_none,
+        train_dataset, batch_size=batch_size, shuffle=True, num_workers=2,
+        pin_memory=True, collate_fn=collate_skip_none, drop_last=True,
     )
     train_iter = iter(train_loader)
 
@@ -90,32 +96,47 @@ def pretrain(
     accum_aff = 0.0
     t_start = time.time()
 
-    logger.info(f"Starting pretraining: {max_steps} steps, lr={lr}, device={device}")
+    logger.info(f"Starting pretraining: {max_steps} steps, lr={lr}, batch_size={batch_size}, device={device}")
+
+    # Learning rate warmup scheduler: linearly ramp from lr/100 to lr
+    # over the first 1000 steps to prevent gradient explosion
+    warmup_steps = 1000
+    def get_lr_scale(current_step):
+        if current_step < warmup_steps:
+            return 0.01 + 0.99 * (current_step / warmup_steps)
+        return 1.0
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, get_lr_scale)
+
+    from tqdm import tqdm
+    pbar = tqdm(total=max_steps, initial=start_step, desc="Pretraining Phase A")
 
     while step < max_steps:
+        try:
+            sample = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_loader)
+            sample = next(train_iter)
+
+        # Skip bad batches (all samples were None)
+        if sample is None:
+            continue
+
+        # Move to device
+        pocket_pos = sample["pocket_pos"].to(device)
+        pocket_feat = sample["pocket_feat"].to(device)
+        ligand_pos = sample["ligand_pos"].to(device)
+        ligand_feat = sample["ligand_feat"].to(device)
+        ligand_types = sample["ligand_atom_types"].to(device)
+        affinity = sample["affinity"].to(device)
+        weight = sample["weight"].to(device)
+        ligand_bonds = sample["ligand_bonds"].to(device)
+        batch_P = sample["batch_P"].to(device)
+        batch_L = sample["batch_L"].to(device)
+
         optimizer.zero_grad()
-        batch_loss = 0.0
 
-        for _ in range(batch_size):
-            try:
-                sample = next(train_iter)
-            except StopIteration:
-                train_iter = iter(train_loader)
-                sample = next(train_iter)
-
-            # Skip bad samples (corrupt/missing files)
-            if sample is None:
-                continue
-
-            # Move to device
-            pocket_pos = sample["pocket_pos"].to(device)
-            pocket_feat = sample["pocket_feat"].to(device)
-            ligand_pos = sample["ligand_pos"].to(device)
-            ligand_feat = sample["ligand_feat"].to(device)
-            ligand_types = sample["ligand_atom_types"].to(device)
-            affinity = sample["affinity"].to(device)
-            weight = sample["weight"].to(device)
-
+        with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
             losses = model.compute_loss(
                 pocket_pos=pocket_pos,
                 pocket_feat=pocket_feat,
@@ -127,30 +148,61 @@ def pretrain(
                 affinity_lambda=affinity_lambda,
                 reward_offset=reward_offset,
                 reward_scale=reward_scale,
+                type_loss_weight=type_loss_weight,
+                ligand_bonds=ligand_bonds,
+                batch_P=batch_P,
+                batch_L=batch_L,
             )
 
-            loss = losses["total_loss"] / batch_size
-            loss.backward()
-            batch_loss += losses["total_loss"].item()
-            accum_flow += losses["flow_loss"].item()
-            accum_aff += losses["affinity_loss"].item()
+        # Guard: skip step if loss is NaN to prevent poisoning model weights
+        if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
+            logger.warning(f"NaN/Inf loss at step {step+1}, skipping batch")
+            continue
+
+        # bf16 doesn't need GradScaler, but fp16 does
+        if use_amp and amp_dtype == torch.float16:
+            scaler.scale(losses["total_loss"]).backward()
+        else:
+            losses["total_loss"].backward()
+
+        # Check for NaN gradients — clip_grad_norm_ does NOT handle NaN,
+        # it just propagates it, which permanently corrupts model weights
+        grad_ok = True
+        for p in model.parameters():
+            if p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()):
+                grad_ok = False
+                break
+
+        if not grad_ok:
+            logger.warning(f"NaN/Inf gradient at step {step+1}, skipping update")
+            optimizer.zero_grad()
+            continue
 
         # Gradient clipping
         nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
+        if use_amp and amp_dtype == torch.float16:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        scheduler.step()
 
         step += 1
-        accum_loss += batch_loss
+        pbar.update(1)
+        accum_loss += losses["total_loss"].item()
+        accum_flow += losses["flow_loss"].item()
+        accum_aff += losses["affinity_loss"].item()
 
         # ── Contrastive ranking loss (every 4th step) ──
         if step % 4 == 0 and hasattr(train_dataset, 'contrastive_pairs'):
             optimizer.zero_grad()
             pair = train_dataset.sample_contrastive_pair()
             if pair is not None:
-                c_loss = model.compute_contrastive_loss(**{
-                    k: v.to(device) if isinstance(v, torch.Tensor) else v
-                    for k, v in pair.items()
-                })
+                with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                    c_loss = model.compute_contrastive_loss(**{
+                        k: v.to(device) if isinstance(v, torch.Tensor) else v
+                        for k, v in pair.items()
+                    })
                 (0.05 * c_loss).backward()  # λ_contrastive = 0.05
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
@@ -158,10 +210,17 @@ def pretrain(
         # ── Logging ──
         if step % 100 == 0:
             avg_loss = accum_loss / 100
-            avg_flow = accum_flow / (100 * batch_size)
-            avg_aff = accum_aff / (100 * batch_size)
+            avg_flow = accum_flow / 100
+            avg_aff = accum_aff / 100
             elapsed = time.time() - t_start
             steps_per_sec = step / elapsed
+
+            pbar.set_postfix({
+                "loss": f"{avg_loss:.4f}",
+                "flow": f"{avg_flow:.4f}",
+                "aff": f"{avg_aff:.4f}",
+                "it/s": f"{steps_per_sec:.1f}"
+            })
 
             logger.info(
                 f"Step {step}/{max_steps} | "
@@ -196,6 +255,7 @@ def pretrain(
         "optimizer_state_dict": optimizer.state_dict(),
     }, final_path)
     logger.info(f"Pretraining complete. Final checkpoint: {final_path}")
+    pbar.close()
 
     return model
 
@@ -226,6 +286,7 @@ def evaluate(
         ligand_feat = sample["ligand_feat"].to(device)
         ligand_types = sample["ligand_atom_types"].to(device)
         affinity = sample["affinity"].to(device)
+        ligand_bonds = sample["ligand_bonds"].to(device)
 
         losses = model.compute_loss(
             pocket_pos=pocket_pos,
@@ -236,6 +297,7 @@ def evaluate(
             affinity=affinity,
             reward_offset=reward_offset,
             reward_scale=reward_scale,
+            ligand_bonds=ligand_bonds,
         )
         total_loss += losses["total_loss"].item()
         n_valid += 1

@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 
 from ..data.featurizer import build_knn_graph, rbf_encode
+from .utils import scatter_mean
 
 
 class EGNNPocketLayer(nn.Module):
@@ -66,8 +67,8 @@ class EGNNPocketLayer(nn.Module):
         att_ij = self.att_mlp(m_ij)                 # (E, 1)
         m_ij = att_ij * m_ij                        # gated messages
 
-        # Aggregate messages per node
-        agg = torch.zeros_like(h)
+        # Aggregate messages per node (match dtype for bf16 compatibility)
+        agg = torch.zeros_like(h).to(m_ij.dtype)
         agg.index_add_(0, dst, m_ij)
 
         # Update node features (residual)
@@ -119,21 +120,31 @@ class PocketEncoder(nn.Module):
 
     def forward(
         self,
-        pos: torch.Tensor,   # (N_P, 3) — pocket atom coordinates
-        feat: torch.Tensor,  # (N_P, in_dim) — pocket atom features
+        pos: torch.Tensor,              # (N_P, 3) — pocket atom coordinates
+        feat: torch.Tensor,             # (N_P, in_dim) — pocket atom features
+        batch_P: torch.Tensor = None,   # (N_P,) long — graph assignment
     ) -> dict:
         """
         Returns
         -------
         dict with keys:
             h_P    : (N_P, hidden_dim) — per-atom pocket embeddings
-            h_glob : (hidden_dim,)     — global pocket embedding (mean-pool)
+            h_glob : (B, hidden_dim) or (hidden_dim,) — global pocket embedding
         """
-        # Build k-NN graph
-        edge_index, edge_dist = build_knn_graph(pos, k=self.knn_k)
+        # Infinite shift trick: offset each graph's coords so k-NN
+        # never connects atoms from different graphs
+        if batch_P is not None:
+            pos_shifted = pos + batch_P.unsqueeze(-1).float() * 10000.0
+        else:
+            pos_shifted = pos
 
-        # RBF edge features
-        edge_feat = rbf_encode(edge_dist, num_rbf=self.num_rbf)
+        # Build k-NN graph (on shifted coords to isolate graphs)
+        edge_index, _ = build_knn_graph(pos_shifted, k=self.knn_k)
+
+        # RBF edge features (on REAL distances, not shifted)
+        diff_real = pos[edge_index[0]] - pos[edge_index[1]]
+        real_dist = torch.sqrt((diff_real ** 2).sum(dim=-1) + 1e-8)
+        edge_feat = rbf_encode(real_dist, num_rbf=self.num_rbf)
 
         # Project input features
         h = self.input_proj(feat)  # (N_P, hidden_dim)
@@ -143,6 +154,11 @@ class PocketEncoder(nn.Module):
             h = layer(h, pos, edge_index, edge_feat)
 
         # Global mean-pool
-        h_glob = self.global_proj(h.mean(dim=0))  # (hidden_dim,)
+        if batch_P is not None:
+            B = batch_P.max().item() + 1
+            h_glob = scatter_mean(h, batch_P, B)       # (B, hidden_dim)
+            h_glob = self.global_proj(h_glob)           # (B, hidden_dim)
+        else:
+            h_glob = self.global_proj(h.mean(dim=0))    # (hidden_dim,)
 
         return {"h_P": h, "h_glob": h_glob}

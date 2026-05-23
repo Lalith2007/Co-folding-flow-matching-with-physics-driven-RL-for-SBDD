@@ -274,13 +274,23 @@ class SBDDDataset(Dataset):
         if pair_a["affinity"] > pair_b["affinity"]:
             pair_a, pair_b = pair_b, pair_a
 
-        # Featurize pocket (shared — use pocket from pair_a)
-        pocket_path = self.base_dir / pair_a["pocket_path"]
-        pocket_data = self.pocket_feat.featurize(str(pocket_path))
+        # Featurize pocket and both ligands — skip on corrupt files
+        try:
+            pocket_path = self.base_dir / pair_a["pocket_path"]
+            pocket_data = self.pocket_feat.featurize(str(pocket_path))
 
-        # Featurize both ligands
-        lig_a = self.ligand_feat.featurize(str(self.base_dir / pair_a["ligand_path"]))
-        lig_b = self.ligand_feat.featurize(str(self.base_dir / pair_b["ligand_path"]))
+            lig_a = self.ligand_feat.featurize(str(self.base_dir / pair_a["ligand_path"]))
+            lig_b = self.ligand_feat.featurize(str(self.base_dir / pair_b["ligand_path"]))
+
+            # Validate — ensure we got real tensors
+            if pocket_data["pos"] is None or lig_a["pos"] is None or lig_b["pos"] is None:
+                return None
+            if pocket_data["pos"].shape[0] == 0 or lig_a["pos"].shape[0] == 0 or lig_b["pos"].shape[0] == 0:
+                return None
+
+        except Exception as e:
+            logger.debug(f"Contrastive sample failed for {pdb_id}: {e}")
+            return None
 
         return {
             "pocket_pos": pocket_data["pos"],
@@ -288,10 +298,12 @@ class SBDDDataset(Dataset):
             "ligand_pos_a": lig_a["pos"],
             "ligand_feat_a": lig_a["feat"],
             "ligand_types_a": lig_a["atom_types"],
+            "ligand_bonds_a": lig_a["bonds"],
             "affinity_a": pair_a["affinity"],
             "ligand_pos_b": lig_b["pos"],
             "ligand_feat_b": lig_b["feat"],
             "ligand_types_b": lig_b["atom_types"],
+            "ligand_bonds_b": lig_b["bonds"],
             "affinity_b": pair_b["affinity"],
         }
 
@@ -313,6 +325,18 @@ class SBDDDataset(Dataset):
                 return None
             if pocket_data["pos"].shape[0] == 0 or ligand_data["pos"].shape[0] == 0:
                 return None
+
+            # Filter: skip molecules with atoms outside the 6-type vocabulary
+            # (e.g., Br, P, I, B get mapped to index 0=C by default;
+            #  we detect them by checking the raw SDF for exotic elements)
+            from .featurizer import LIGAND_ATOM_TYPES
+            from rdkit import Chem
+            suppl = Chem.SDMolSupplier(str(ligand_path), sanitize=True, removeHs=True)
+            mol = next(iter(suppl), None)
+            if mol is not None:
+                for atom in mol.GetAtoms():
+                    if atom.GetSymbol() not in LIGAND_ATOM_TYPES:
+                        return None  # skip this molecule
 
         except Exception as e:
             logger.debug(f"Skipping {pair['pdb_id']}: {e}")
@@ -336,6 +360,8 @@ class SBDDDataset(Dataset):
             "ligand_pos": ligand_data["pos"],           # (N_L, 3)
             "ligand_feat": ligand_data["feat"],         # (N_L, F_ligand)
             "ligand_atom_types": ligand_data["atom_types"],  # (N_L,) int
+            "ligand_bonds": ligand_data["bonds"],        # (N_L, N_L, 4)
+            "pocket_path": str(pocket_path),
         }
 
     def get_sample_weight(self, idx: int) -> float:
@@ -344,13 +370,61 @@ class SBDDDataset(Dataset):
 
 
 def collate_skip_none(batch):
-    """Custom collate function that filters out None samples.
+    """Disjoint union collation for variable-size molecular graphs.
 
-    When __getitem__ returns None (corrupt/missing files), this collate
-    skips those entries so the DataLoader never crashes.
+    Concatenates all pocket atoms and ligand atoms along dim 0 into
+    one giant 'mega-graph', with ``batch_P`` and ``batch_L`` tensors
+    tracking which atom belongs to which molecule in the batch.
+
+    Bond matrices are assembled into a block-diagonal structure.
     """
     batch = [b for b in batch if b is not None]
     if len(batch) == 0:
         return None
-    return batch[0]  # batch_size=1, so just return the single dict
+
+    B = len(batch)
+
+    # ── Concatenate variable-size tensors ──
+    pocket_pos  = torch.cat([b["pocket_pos"]  for b in batch], dim=0)
+    pocket_feat = torch.cat([b["pocket_feat"] for b in batch], dim=0)
+    ligand_pos  = torch.cat([b["ligand_pos"]  for b in batch], dim=0)
+    ligand_feat = torch.cat([b["ligand_feat"] for b in batch], dim=0)
+    ligand_types = torch.cat([b["ligand_atom_types"] for b in batch], dim=0)
+
+    # ── Batch assignment vectors ──
+    batch_P = torch.cat([
+        torch.full((b["pocket_pos"].size(0),), i, dtype=torch.long)
+        for i, b in enumerate(batch)
+    ])
+    batch_L = torch.cat([
+        torch.full((b["ligand_pos"].size(0),), i, dtype=torch.long)
+        for i, b in enumerate(batch)
+    ])
+
+    # ── Scalars → stacked ──
+    affinity = torch.stack([b["affinity"] for b in batch])   # (B,)
+    weight   = torch.stack([b["weight"]   for b in batch])   # (B,)
+
+    # ── Block-diagonal bond matrix ──
+    total_L = ligand_pos.size(0)
+    bonds = torch.zeros(total_L, total_L, 4)
+    offset = 0
+    for b in batch:
+        n = b["ligand_bonds"].size(0)
+        bonds[offset:offset+n, offset:offset+n, :] = b["ligand_bonds"]
+        offset += n
+
+    return {
+        "pocket_pos":   pocket_pos,
+        "pocket_feat":  pocket_feat,
+        "ligand_pos":   ligand_pos,
+        "ligand_feat":  ligand_feat,
+        "ligand_atom_types": ligand_types,
+        "ligand_bonds": bonds,
+        "affinity":     affinity,
+        "weight":       weight,
+        "batch_P":      batch_P,
+        "batch_L":      batch_L,
+        "batch_size":   B,
+    }
 

@@ -79,7 +79,7 @@ class InferencePipeline:
         )
         egnn = SBDDEGNN(
             ligand_in_dim=20, hidden_dim=128, num_layers=9,
-            num_heads=16, num_atom_types=10, knn_k=16,
+            num_heads=16, num_atom_types=6, knn_k=16,
         )
         model = FlowMatching(
             pocket_encoder=pocket_encoder,
@@ -90,7 +90,7 @@ class InferencePipeline:
         # Load weights
         ckpt = torch.load(checkpoint_path, map_location=self.device)
         state_dict = ckpt.get("model_state_dict", ckpt)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
         model = model.to(self.device)
 
         return model

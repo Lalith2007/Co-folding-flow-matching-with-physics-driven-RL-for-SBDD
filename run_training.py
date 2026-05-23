@@ -190,7 +190,7 @@ def run_phase_a(
     if checkpoint:
         logger.info(f"Resuming from checkpoint: {checkpoint}")
         ckpt = torch.load(checkpoint, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
+        model.load_state_dict(ckpt["model_state_dict"], strict=False)
         start_step = ckpt.get("step", 0)
         opt_state = ckpt.get("optimizer_state_dict", None)
 
@@ -207,6 +207,7 @@ def run_phase_a(
         betas=tuple(pt_cfg["betas"]),
         grad_clip=pt_cfg["grad_clip"],
         affinity_lambda=pt_cfg["affinity_loss_lambda"],
+        type_loss_weight=pt_cfg.get("type_loss_weight", 5.0),
         eval_every=pt_cfg["eval_every"],
         save_every=pt_cfg["save_every"],
         save_dir="checkpoints",
@@ -239,7 +240,7 @@ def run_phase_b(model, cfg, train_pairs, device, checkpoint=None):
 
     # Load the pretrained weights into the model
     ckpt = torch.load(pretrained_ckpt, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
 
     rl_cfg = cfg["rl"]
 
@@ -282,7 +283,7 @@ def run_phase_c(model, cfg, train_pairs, device, checkpoint=None):
         return model
 
     ckpt = torch.load(rl_ckpt, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
 
     model = rl_inpaint(
         model=model,
@@ -328,6 +329,10 @@ Examples:
         "--device", default=None,
         help="Override device ('cuda' or 'cpu'). Default: from config."
     )
+    parser.add_argument(
+        "--max_steps", type=int, default=None,
+        help="Override max training steps for Phase A. Useful for warm-up runs."
+    )
     args = parser.parse_args()
 
     # Load config
@@ -343,7 +348,7 @@ Examples:
     if torch.cuda.is_available():
         logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
         logger.info(
-            f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB"
+            f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
         )
 
     # Build model
@@ -370,6 +375,8 @@ Examples:
 
     # ── Execute phases ──
     if "A" in phases:
+        if args.max_steps is not None:
+            cfg["pretrain"]["max_steps"] = args.max_steps
         model = run_phase_a(
             model, cfg, train_dataset, val_dataset, device,
             checkpoint=start_ckpt if "A" == phases[0] else None,

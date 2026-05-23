@@ -41,18 +41,14 @@ pocket:
 
 # ── Ligand featurisation ──
 ligand:
-  atom_types:                # 10 atom types for categorical flow
+  atom_types:                # 6 drug-like atom types for categorical flow
     - C
     - N
     - O
     - S
     - F
     - Cl
-    - Br
-    - P
-    - I
-    - B
-  num_atom_types: 10
+  num_atom_types: 6
 
 # ── Pocket Encoder ──
 pocket_encoder:
@@ -77,13 +73,18 @@ value_head:
   hidden_dim: 128
   num_layers: 2
 
-# ── Multi-objective reward ──
+# ── Multi-objective reward (pharma-grade) ──
 reward:
   w_vina: 0.40
   w_qed: 0.20
   w_sa: 0.15
   w_lipinski: 0.10
-  w_proxy: 0.15
+  w_proxy: 0.10
+  min_carbon_ratio: 0.40     # ≥40% carbon atoms required (prevents sulfur collapse)
+  max_nitrogen_ratio: 0.35   # ≤35% nitrogen atoms (prevents nitrogen bomb exploit)
+  max_nn_bonds: 2            # ≤2 N-N single bonds (prevents hydrazine/azide chains)
+  max_sa_score: 6.0          # SA ≤ 6.0 (reject unsynthesizable structures)
+  max_ring_nitrogen: 2       # ≤2 N atoms per ring (reject fused tetrazoles/pentazoles)
   contrastive_bonus: 0.10
   vina_every_n: 10           # Vina oracle called every N RL rounds
 
@@ -94,19 +95,20 @@ pretrain:
   lr: 3.0e-4
   weight_decay: 1.0e-2
   betas: [0.9, 0.999]
-  grad_clip: 8.0
+  grad_clip: 1.0
   affinity_loss_lambda: 0.1  # balance generative vs critic
   affinity_temp: 2.0         # temperature for softmax weighting
+  type_loss_weight: 5.0      # upweight atom type loss to fix categorical flow
   eval_every: 2000
   save_every: 10000
 
 # ── Phase B: RL Fine-tuning (DDPO) ──
 rl:
-  max_steps: 50000
+  max_steps: 1000              # 1000 real RL steps is plenty with actual gradients
   lr: 1.0e-5
-  batch_pockets: 32          # pockets per RL round
-  mols_per_pocket: 100       # generate per pocket
-  top_k: 10                  # keep top-k for gradient
+  batch_pockets: 1             # 1 pocket per RL round (focus learning)
+  mols_per_pocket: 5           # generate 5 per pocket
+  top_k: 2                     # keep top-2 for gradient
   kl_beta_start: 0.01
   kl_beta_end: 0.001
   kl_anneal: "cosine"

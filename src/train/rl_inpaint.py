@@ -89,6 +89,9 @@ def rl_inpaint(
         f"scaffold_ratio={scaffold_ratio}"
     )
 
+    from tqdm import tqdm
+    pbar = tqdm(total=max_steps, initial=0, desc="RL Phase C (Inpaint)")
+
     while step < max_steps:
         optimizer.zero_grad()
         beta = beta_schedule(step)
@@ -204,11 +207,21 @@ def rl_inpaint(
             optimizer.step()
 
         step += 1
+        pbar.update(1)
 
         if step % 10 == 0 and n_mols > 0:
+            avg_r = total_reward / n_mols
+            avg_loss = total_loss / n_mols
+            
+            pbar.set_postfix({
+                "R": f"{avg_r:.3f}",
+                "loss": f"{avg_loss:.4f}",
+                "β": f"{beta:.4f}"
+            })
+
             logger.info(
                 f"Inpaint RL Step {step}/{max_steps} | "
-                f"R={total_reward/n_mols:.3f} loss={total_loss/n_mols:.4f} "
+                f"R={avg_r:.3f} loss={avg_loss:.4f} "
                 f"β={beta:.4f}"
             )
 
@@ -220,6 +233,7 @@ def rl_inpaint(
             }, ckpt_path)
             logger.info(f"  Saved: {ckpt_path}")
 
+    pbar.close()
     return model
 
 
@@ -242,7 +256,7 @@ def _sample_with_scaffold_mask(
     h_P = pocket_out["h_P"]
 
     size_pred = model.size_predictor(pocket_out["h_glob"])
-    N_L = max(int(size_pred.item() + 0.5), 6)
+    N_L = int(torch.randint(20, 35, (1,)).item())
 
     # Create scaffold mask: randomly select scaffold_ratio of atoms
     n_scaffold = max(1, int(N_L * scaffold_ratio))

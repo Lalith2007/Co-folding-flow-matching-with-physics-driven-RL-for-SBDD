@@ -33,7 +33,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..data.featurizer import build_knn_graph, rbf_encode
-from .utils import SinusoidalTimeEmbedding
+from .utils import SinusoidalTimeEmbedding, scatter_mean, subtract_com
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -65,6 +65,8 @@ class PocketCrossAttention(nn.Module):
         self,
         h_L: torch.Tensor,  # (N_L, D) ligand features
         h_P: torch.Tensor,  # (N_P, D) pocket features
+        batch_L: torch.Tensor = None,  # (N_L,) graph assignment
+        batch_P: torch.Tensor = None,  # (N_P,) graph assignment
     ) -> torch.Tensor:
         """Returns updated ligand features with pocket context."""
         N_L = h_L.size(0)
@@ -76,6 +78,14 @@ class PocketCrossAttention(nn.Module):
 
         # (N_L, H, N_P)
         attn = torch.einsum("lhd,phd->lhp", Q, K) * self.scale
+
+        # Mask: each ligand atom only attends to pocket atoms from its own graph
+        if batch_L is not None and batch_P is not None:
+            # (N_L, N_P) — True where graphs match
+            cross_mask = (batch_L.unsqueeze(1) == batch_P.unsqueeze(0))
+            # Expand to (N_L, H, N_P) and apply -inf to cross-graph entries
+            attn = attn.masked_fill(~cross_mask.unsqueeze(1), float('-inf'))
+
         attn = F.softmax(attn, dim=-1)
         attn = self.dropout(attn)
 
@@ -148,6 +158,13 @@ class EGNNLayerWithCrossAttn(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
+        # Zero-init output layers of coordinate MLPs so the model starts
+        # as identity (no coordinate change) — standard EGNN practice
+        nn.init.zeros_(self.coord_dist_mlp[-1].weight)
+        nn.init.zeros_(self.coord_dist_mlp[-1].bias)
+        nn.init.zeros_(self.coord_cross_mlp[-1].weight)
+        nn.init.zeros_(self.coord_cross_mlp[-1].bias)
+
     def forward(
         self,
         h_L: torch.Tensor,          # (N_L, D) ligand features
@@ -155,6 +172,8 @@ class EGNNLayerWithCrossAttn(nn.Module):
         h_P: torch.Tensor,          # (N_P, D) pocket features
         edge_index: torch.Tensor,   # (2, E) ligand graph edges
         edge_feat: torch.Tensor,    # (E, edge_feat_dim) RBF features
+        batch_L: torch.Tensor = None,  # (N_L,) graph assignment
+        batch_P: torch.Tensor = None,  # (N_P,) graph assignment
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns
@@ -163,7 +182,7 @@ class EGNNLayerWithCrossAttn(nn.Module):
         x_L_new : (N_L, 3) updated ligand coordinates
         """
         # 1. Cross-attend to pocket
-        h_L = self.cross_attn(h_L, h_P)
+        h_L = self.cross_attn(h_L, h_P, batch_L, batch_P)
 
         # 2. Message passing
         src, dst = edge_index
@@ -174,7 +193,7 @@ class EGNNLayerWithCrossAttn(nn.Module):
         att_ij = self.att_mlp(m_ij)
         m_ij = att_ij * m_ij
 
-        agg = torch.zeros_like(h_L)
+        agg = torch.zeros_like(h_L).to(m_ij.dtype)
         agg.index_add_(0, dst, m_ij)
 
         h_L_new = self.node_mlp(torch.cat([h_L, agg], dim=-1))
@@ -182,7 +201,9 @@ class EGNNLayerWithCrossAttn(nn.Module):
 
         # 3. SE(3) coordinate update
         diff = x_L[src] - x_L[dst]                             # (E, 3)
-        dist = torch.norm(diff, dim=-1, keepdim=True).clamp(min=1e-8)
+        # Distance-based displacement
+        # Safe norm to prevent NaN gradients at exactly 0 distance
+        dist = torch.sqrt((diff ** 2).sum(dim=-1, keepdim=True) + 1e-8)
         direction = diff / dist                                  # unit vector
 
         # Distance-based displacement
@@ -190,19 +211,25 @@ class EGNNLayerWithCrossAttn(nn.Module):
         delta_dist = direction * w_dist                          # (E, 3)
 
         # Cross-product term (SE(3) not E(3))
-        x_mean = x_L.mean(dim=0, keepdim=True)
-        v_i = x_L[src] - x_mean                                 # (E, 3)
-        v_j = x_L[dst] - x_mean                                 # (E, 3)
+        # Per-graph CoM for batched inputs
+        x_mean = subtract_com(x_L, batch_L) if batch_L is not None else x_L - x_L.mean(dim=0, keepdim=True)
+        # Use centred positions for cross-product
+        v_i = x_mean[src]                                        # (E, 3)
+        v_j = x_mean[dst]                                        # (E, 3)
         cross = torch.cross(v_i, v_j, dim=-1)                   # (E, 3)
-        cross_norm = torch.norm(cross, dim=-1, keepdim=True).clamp(min=1e-8)
+        # Safe norm for cross product
+        cross_norm = torch.sqrt((cross ** 2).sum(dim=-1, keepdim=True) + 1e-8)
         cross_dir = cross / (cross_norm + 1.0)
 
         w_cross = self.coord_cross_mlp(edge_input)              # (E, 1)
         delta_cross = cross_dir * w_cross                        # (E, 3)
 
         # Aggregate coordinate updates
-        delta_x = torch.zeros_like(x_L)
+        delta_x = torch.zeros_like(x_L).to((delta_dist + delta_cross).dtype)
         delta_x.index_add_(0, dst, delta_dist + delta_cross)
+
+        # Clamp coordinate updates to prevent explosion across 9 layers
+        delta_x = delta_x.clamp(-10.0, 10.0)
 
         x_L = x_L + delta_x
 
@@ -246,17 +273,19 @@ class SBDDEGNN(nn.Module):
         self.knn_k = knn_k
         self.num_rbf = num_rbf
         self.num_atom_types = num_atom_types
+        self.num_bond_types = 4  # single, double, triple, aromatic
 
         # Time embedding
         self.time_emb = SinusoidalTimeEmbedding(time_emb_dim)
         self.time_proj = nn.Linear(time_emb_dim, hidden_dim)
 
-        # Input projection for ligand features
-        self.ligand_proj = nn.Linear(ligand_in_dim + num_atom_types, hidden_dim)
+        # Input projection for ligand features (ONLY use noised atom types!)
+        self.ligand_proj = nn.Linear(num_atom_types, hidden_dim)
 
-        # EGNN layers
+        # EGNN layers — edge features are RBF (16) + bond type one-hot (4) = 20
+        edge_feat_dim = num_rbf + self.num_bond_types
         self.layers = nn.ModuleList([
-            EGNNLayerWithCrossAttn(hidden_dim, num_heads, num_rbf, dropout)
+            EGNNLayerWithCrossAttn(hidden_dim, num_heads, edge_feat_dim, dropout)
             for _ in range(num_layers)
         ])
 
@@ -275,6 +304,19 @@ class SBDDEGNN(nn.Module):
             nn.Linear(hidden_dim, num_atom_types),
         )
 
+        # ── Pocket Flexibility Heads (Induced Fit) ──
+        # Queries: Pocket (N_P), Keys/Values: Ligand (N_L)
+        self.pocket_vel_cross_attn = PocketCrossAttention(hidden_dim, num_heads, dropout)
+        self.vel_pocket_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 3),
+        )
+        # Zero-initialize the final layer so the model starts out rigid
+        # and doesn't destroy the pretrained geometry.
+        nn.init.zeros_(self.vel_pocket_head[-1].weight)
+        nn.init.zeros_(self.vel_pocket_head[-1].bias)
+
         # ── Affinity value head (critic) ──
         self.value_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -285,58 +327,96 @@ class SBDDEGNN(nn.Module):
     def forward(
         self,
         x_L: torch.Tensor,           # (N_L, 3) ligand coords at time t
-        h_L_raw: torch.Tensor,        # (N_L, ligand_in_dim) raw features
+        h_L_raw: torch.Tensor,        # (N_L, ligand_in_dim) raw features (IGNORED)
         atom_types_onehot: torch.Tensor,  # (N_L, num_atom_types) noised one-hot
         t: torch.Tensor,              # (1,) or scalar — time in [0, 1]
         h_P: torch.Tensor,            # (N_P, pocket_dim) pocket embeddings
+        ligand_bonds: torch.Tensor = None,  # (N_L, N_L, 4) bond type one-hots
+        batch_L: torch.Tensor = None,  # (N_L,) graph assignment
+        batch_P: torch.Tensor = None,  # (N_P,) graph assignment
     ) -> dict:
-        """
-        Returns
-        -------
-        dict with:
-            vel_coord : (N_L, 3) predicted coordinate velocity
-            vel_type  : (N_L, num_atom_types) predicted type velocity
-            pK_pred   : scalar — predicted affinity proxy
-            h_L       : (N_L, hidden_dim) final ligand embeddings
-        """
+        device = x_L.device
         N_L = x_L.size(0)
 
-        # Time conditioning
-        t_emb = self.time_proj(self.time_emb(t))  # (1, hidden_dim)
-        if t_emb.dim() == 2:
-            t_emb = t_emb.squeeze(0)  # (hidden_dim,)
+        # 1. Initial embeddings
+        t_emb = self.time_proj(self.time_emb(t))               # (1, hidden_dim)
+        if t_emb.size(0) == 1 and N_L > 1:
+            t_emb = t_emb.expand(N_L, -1)                      # (N_L, hidden_dim)
 
-        # Ligand input: concatenate raw features + noised atom type one-hot
-        h_L_input = torch.cat([h_L_raw, atom_types_onehot], dim=-1)
-        h_L = self.ligand_proj(h_L_input)         # (N_L, hidden_dim)
+        # Only project the noised atom types! (No cheating from h_L_raw)
+        h_L = self.ligand_proj(atom_types_onehot)              # (N_L, hidden_dim)
 
-        # Add time embedding
-        h_L = h_L + t_emb.unsqueeze(0).expand(N_L, -1)
+        # Add time embedding (t_emb is already (N_L, hidden_dim) after expand)
+        h_L = h_L + t_emb
 
-        # Build ligand k-NN graph
-        edge_index, edge_dist = build_knn_graph(x_L, k=self.knn_k)
-        edge_feat = rbf_encode(edge_dist, num_rbf=self.num_rbf)
+        # Build ligand k-NN graph with infinite shift trick
+        if batch_L is not None:
+            x_L_shifted = x_L + batch_L.unsqueeze(-1).float() * 10000.0
+        else:
+            x_L_shifted = x_L
+        edge_index, _ = build_knn_graph(x_L_shifted, k=self.knn_k)
+        # Compute RBF on REAL distances (safe norm)
+        diff_real = x_L[edge_index[0]] - x_L[edge_index[1]]
+        real_dist = torch.sqrt((diff_real ** 2).sum(dim=-1) + 1e-8)
+        edge_feat_rbf = rbf_encode(real_dist, num_rbf=self.num_rbf)
+
+        # Append bond-type features to RBF edge features
+        if ligand_bonds is not None:
+            bond_feat = ligand_bonds[edge_index[0], edge_index[1]]  # (E, 4)
+        else:
+            bond_feat = torch.zeros(edge_feat_rbf.size(0), self.num_bond_types,
+                                    device=edge_feat_rbf.device)
+        edge_feat = torch.cat([edge_feat_rbf, bond_feat], dim=-1)  # (E, num_rbf + 4)
 
         # 9 layers of EGNN with cross-attention
         for layer in self.layers:
-            h_L, x_L = layer(h_L, x_L, h_P, edge_index, edge_feat)
+            h_L, x_L = layer(h_L, x_L, h_P, edge_index, edge_feat,
+                             batch_L=batch_L, batch_P=batch_P)
 
             # Rebuild graph after coordinate update (dynamic graph)
-            edge_index, edge_dist = build_knn_graph(x_L, k=self.knn_k)
-            edge_feat = rbf_encode(edge_dist, num_rbf=self.num_rbf)
+            if batch_L is not None:
+                x_L_shifted = x_L + batch_L.unsqueeze(-1).float() * 10000.0
+            else:
+                x_L_shifted = x_L
+            edge_index, _ = build_knn_graph(x_L_shifted, k=self.knn_k)
+            diff_real = x_L[edge_index[0]] - x_L[edge_index[1]]
+            real_dist = torch.sqrt((diff_real ** 2).sum(dim=-1) + 1e-8)
+            edge_feat_rbf = rbf_encode(real_dist, num_rbf=self.num_rbf)
+
+            # Re-append bond features with updated k-NN edges
+            if ligand_bonds is not None:
+                bond_feat = ligand_bonds[edge_index[0], edge_index[1]]  # (E, 4)
+            else:
+                bond_feat = torch.zeros(edge_feat_rbf.size(0), self.num_bond_types,
+                                        device=edge_feat_rbf.device)
+            edge_feat = torch.cat([edge_feat_rbf, bond_feat], dim=-1)
 
         # Velocity heads
         vel_coord = self.vel_coord_head(h_L)   # (N_L, 3)
         vel_type = self.vel_type_head(h_L)      # (N_L, num_atom_types)
 
-        # Affinity value head: mean-pool over ligand → scalar
-        h_pool = h_L.mean(dim=0)                # (hidden_dim,)
-        pK_pred = self.value_head(h_pool)        # (1,)
+        # ── Pocket Flexibility (Induced Fit) ──
+        # Let pocket attend to the final ligand features to figure out how to move
+        # PocketCrossAttention.forward(h_L=queries, h_P=keys/values, batch_L, batch_P)
+        # Here we REVERSE the roles: pocket queries, ligand provides context
+        h_P_updated = self.pocket_vel_cross_attn(
+            h_P, h_L, batch_P, batch_L
+        )
+        vel_pocket = self.vel_pocket_head(h_P_updated) # (N_P, 3)
+
+        # Affinity value head: per-graph mean-pool
+        if batch_L is not None:
+            B = batch_L.max().item() + 1
+            h_pool = scatter_mean(h_L, batch_L, B)  # (B, hidden_dim)
+        else:
+            h_pool = h_L.mean(dim=0, keepdim=True)  # (1, hidden_dim)
+        pK_pred = self.value_head(h_pool).squeeze(-1)  # (B,) or (1,)
 
         return {
             "vel_coord": vel_coord,
             "vel_type": vel_type,
-            "pK_pred": pK_pred.squeeze(-1),
+            "vel_pocket": vel_pocket,
+            "pK_pred": pK_pred.squeeze() if pK_pred.numel() == 1 else pK_pred,
             "h_L": h_L,
             "x_L_updated": x_L,
         }

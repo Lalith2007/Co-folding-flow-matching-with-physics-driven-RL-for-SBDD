@@ -15,6 +15,10 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
+from rdkit import RDLogger
+
+# Suppress RDKit C++ warnings/errors from spamming the console
+RDLogger.DisableLog('rdApp.*')
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +41,7 @@ AA_TO_IDX = {aa: i for i, aa in enumerate(AA_LIST)}
 NUM_AA = len(AA_LIST) + 1  # +1 for UNK
 
 # ── Ligand atom type vocabulary (for categorical flow) ──
-LIGAND_ATOM_TYPES = ["C", "N", "O", "S", "F", "Cl", "Br", "P", "I", "B"]
+LIGAND_ATOM_TYPES = ["C", "N", "O", "S", "F", "Cl"]
 LIGAND_ATOM_TO_IDX = {a: i for i, a in enumerate(LIGAND_ATOM_TYPES)}
 NUM_LIGAND_ATOM_TYPES = len(LIGAND_ATOM_TYPES)
 
@@ -55,31 +59,73 @@ def build_knn_graph(
     Returns
     -------
     edge_index : (2, E)  long tensor of directed edges
-    edge_dist  : (E,)    Euclidean distances for each edge
+    edge_dist  : (E,)    Euclidean distances for each edge (gradient-safe)
     """
-    # Pairwise distance matrix
-    diff = pos.unsqueeze(0) - pos.unsqueeze(1)   # (N, N, 3)
-    dist = torch.norm(diff, dim=-1)                # (N, N)
+    # Pairwise distance matrix (detached for topology selection only)
+    with torch.no_grad():
+        diff_det = pos.unsqueeze(0) - pos.unsqueeze(1)   # (N, N, 3)
+        dist_det = torch.sqrt((diff_det ** 2).sum(dim=-1) + 1e-8)  # (N, N)
 
-    # For each node, pick the k nearest neighbours (excluding self)
-    n = pos.size(0)
-    k_actual = min(k, n - 1)
+        # For each node, pick the k nearest neighbours (excluding self)
+        n = pos.size(0)
+        k_actual = min(k, n - 1)
 
-    # Set self-distance to inf so it is never selected
-    dist_no_self = dist.clone()
-    dist_no_self.fill_diagonal_(float("inf"))
+        # Set self-distance to inf so it is never selected
+        dist_det.fill_diagonal_(float("inf"))
 
-    _, knn_idx = dist_no_self.topk(k_actual, dim=-1, largest=False)  # (N, k)
+        _, knn_idx = dist_det.topk(k_actual, dim=-1, largest=False)  # (N, k)
 
     # Build edge_index [src, dst]
-    src = torch.arange(n).unsqueeze(1).expand_as(knn_idx).reshape(-1)
+    src = torch.arange(n, device=pos.device).unsqueeze(1).expand_as(knn_idx).reshape(-1)
     dst = knn_idx.reshape(-1)
     edge_index = torch.stack([src, dst], dim=0)  # (2, N*k)
 
-    # Edge distances
-    edge_dist = dist[src, dst]
+    # Recompute edge distances WITH gradient support (safe norm)
+    edge_diff = pos[src] - pos[dst]  # (E, 3)
+    edge_dist = torch.sqrt((edge_diff ** 2).sum(dim=-1) + 1e-8)  # (E,)
 
     return edge_index, edge_dist
+
+
+def build_knn_graph_batched(
+    pos: torch.Tensor,            # (N_total, 3) — concatenated positions
+    batch: torch.Tensor,          # (N_total,) long — graph assignment per atom
+    k: int = 16,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build per-graph k-NN graphs without the infinite shift trick.
+
+    Instead of computing a single N_total × N_total distance matrix
+    (which is O(N²) and allocates gigabytes for large batches), this
+    loops over each graph independently.  For a batch of 32 molecules
+    with ~500 atoms each, compute drops from 256M to 8M distances.
+
+    Returns
+    -------
+    edge_index : (2, E_total) long tensor of directed edges (global indices)
+    edge_dist  : (E_total,)   Euclidean distances for each edge
+    """
+    if batch is None:
+        return build_knn_graph(pos, k)
+
+    B = batch.max().item() + 1
+    edge_indices = []
+    edge_dists = []
+
+    for g in range(B):
+        mask = (batch == g)
+        # Global indices of atoms in this graph
+        global_idx = mask.nonzero(as_tuple=True)[0]  # (n_g,)
+        pos_g = pos[global_idx]                       # (n_g, 3)
+
+        # Build k-NN for this single graph
+        ei_local, ed_local = build_knn_graph(pos_g, k)  # local indices
+
+        # Map local edge indices back to global indices
+        ei_global = global_idx[ei_local]  # (2, E_g)
+        edge_indices.append(ei_global)
+        edge_dists.append(ed_local)
+
+    return torch.cat(edge_indices, dim=1), torch.cat(edge_dists, dim=0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -185,9 +231,13 @@ class PocketFeaturizer:
         pos = torch.tensor(np.array(coords), dtype=torch.float32)
         feat = torch.tensor(np.array(features), dtype=torch.float32)
 
+        # Sanitize: replace any NaN/Inf from malformed PDB fields
+        pos = torch.nan_to_num(pos, nan=0.0, posinf=0.0, neginf=0.0)
+        feat = torch.nan_to_num(feat, nan=0.0, posinf=1.0, neginf=0.0)
+
         # Distance to pocket centroid (normalised by max distance)
         centroid = pos.mean(dim=0, keepdim=True)              # (1, 3)
-        dist_to_centroid = torch.norm(pos - centroid, dim=-1)  # (N,)
+        dist_to_centroid = torch.sqrt(((pos - centroid) ** 2).sum(dim=-1) + 1e-8)  # (N,)
         max_dist = dist_to_centroid.max().clamp(min=1e-8)
         feat[:, -1] = dist_to_centroid / max_dist              # fill last column
 
@@ -238,7 +288,7 @@ class PocketFeaturizer:
 
         # Distance to pocket centroid (normalised by max distance)
         centroid = pos.mean(dim=0, keepdim=True)
-        dist_to_centroid = torch.norm(pos - centroid, dim=-1)
+        dist_to_centroid = torch.sqrt(((pos - centroid) ** 2).sum(dim=-1) + 1e-8)
         max_dist = dist_to_centroid.max().clamp(min=1e-8)
         feat[:, -1] = dist_to_centroid / max_dist
 
@@ -311,4 +361,23 @@ class LigandFeaturizer:
         feat = torch.tensor(np.array(features), dtype=torch.float32)
         atom_types = torch.tensor(atom_type_indices, dtype=torch.long)
 
-        return {"pos": pos, "feat": feat, "atom_types": atom_types}
+        # ── Bond graph: (N_L, N_L, 4) one-hot [single, double, triple, aromatic] ──
+        n_atoms = len(atom_type_indices)
+        bonds = torch.zeros(n_atoms, n_atoms, 4, dtype=torch.float32)
+
+        BOND_TYPE_IDX = {
+            Chem.rdchem.BondType.SINGLE: 0,
+            Chem.rdchem.BondType.DOUBLE: 1,
+            Chem.rdchem.BondType.TRIPLE: 2,
+            Chem.rdchem.BondType.AROMATIC: 3,
+        }
+
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            bt = bond.GetBondType()
+            idx = BOND_TYPE_IDX.get(bt, 0)  # default to single
+            bonds[i, j, idx] = 1.0
+            bonds[j, i, idx] = 1.0
+
+        return {"pos": pos, "feat": feat, "atom_types": atom_types, "bonds": bonds}
