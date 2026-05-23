@@ -1,5 +1,0 @@
-2026-05-06 20:38:05,687 INFO [run_training] Loaded config from configs/default.yaml
-2026-05-06 20:38:05,880 INFO [src.data.dataset] Affinity filter [-13.0, -6.0]: kept 54189/54189 pairs across 11134 proteins (removed 0)
-2026-05-06 20:38:05,923 INFO [src.data.dataset] Split: train=43127 pairs (8907 proteins), val=5595 pairs (1113 proteins), test=5467 pairs (1114 proteins)
-2026-05-06 20:38:05,933 INFO [run_training] Datasets ready: train=43127, val=5595, test=5467
-2026-05-06 20:38:05,933 INFO [run_training] Contrastive pairs available: 6719 proteins with ≥2 ligands
