@@ -508,6 +508,7 @@ class RewardOracle:
         mol,
         pK_pred: torch.Tensor,
         pocket_path: Optional[str] = None,
+        pocket_pos_updated: Optional[torch.Tensor] = None,
         best_known_affinity: Optional[float] = None,
         rl_round: int = 0,
     ) -> dict:
