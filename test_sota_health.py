@@ -33,8 +33,8 @@ except Exception as e:
 
 # 3. Check Pocket Flexibility Zero-Init
 try:
-    from src.model.egnn import SBDDEGNN
-    egnn = SBDDEGNN(
+    from src.model.egnn import SE3EGNN
+    egnn = SE3EGNN(
         ligand_in_dim=20,
         pocket_dim=128,
         hidden_dim=128,

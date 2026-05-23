@@ -240,7 +240,7 @@ class EGNNLayerWithCrossAttn(nn.Module):
 # Full 9-Layer SE(3)-EGNN Model
 # ──────────────────────────────────────────────────────────────────────────────
 
-class SBDDEGNN(nn.Module):
+class SE3EGNN(nn.Module):
     """9-layer SE(3)-EGNN with cross-attention, flow velocity head, and
     affinity value head.
 

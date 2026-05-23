@@ -58,7 +58,7 @@ def load_config(config_path: str = "configs/default.yaml") -> dict:
 def build_model(cfg: dict, device: str) -> "FlowMatching":
     """Construct the full FlowMatching model from config."""
     from src.model.pocket_encoder import PocketEncoder
-    from src.model.egnn import SBDDEGNN
+    from src.model.egnn import SE3EGNN
     from src.model.flow_matching import FlowMatching
 
     pocket_encoder = PocketEncoder(
@@ -68,7 +68,7 @@ def build_model(cfg: dict, device: str) -> "FlowMatching":
         knn_k=cfg["pocket"]["knn_k"],
     )
 
-    egnn = SBDDEGNN(
+    egnn = SE3EGNN(
         ligand_in_dim=20,  # 16 elem + 1 aromatic + 1 degree + 1 charge + 1 ring
         pocket_dim=cfg["egnn"]["hidden_dim"],
         hidden_dim=cfg["egnn"]["hidden_dim"],

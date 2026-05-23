@@ -64,7 +64,7 @@ ELEMENT_TO_ATOMIC_NUM = {
 def load_model(config_path: str, checkpoint_path: str, device: str = "cuda"):
     """Load the FlowMatching model from config + checkpoint."""
     from src.model.pocket_encoder import PocketEncoder
-    from src.model.egnn import SBDDEGNN
+    from src.model.egnn import SE3EGNN
     from src.model.flow_matching import FlowMatching
 
     with open(config_path, "r") as f:
@@ -77,7 +77,7 @@ def load_model(config_path: str, checkpoint_path: str, device: str = "cuda"):
         knn_k=cfg["pocket"]["knn_k"],
     )
 
-    egnn = SBDDEGNN(
+    egnn = SE3EGNN(
         ligand_in_dim=20,
         pocket_dim=cfg["egnn"]["hidden_dim"],
         hidden_dim=cfg["egnn"]["hidden_dim"],

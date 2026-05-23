@@ -70,14 +70,14 @@ class InferencePipeline:
     def _load_model(self, checkpoint_path: str):
         """Load the FlowMatching model from a checkpoint."""
         from ..model.pocket_encoder import PocketEncoder
-        from ..model.egnn import SBDDEGNN
+        from ..model.egnn import SE3EGNN
         from ..model.flow_matching import FlowMatching
 
         # Build model with default architecture
         pocket_encoder = PocketEncoder(
             in_dim=40, hidden_dim=128, num_layers=4, knn_k=16,
         )
-        egnn = SBDDEGNN(
+        egnn = SE3EGNN(
             ligand_in_dim=20, hidden_dim=128, num_layers=9,
             num_heads=16, num_atom_types=6, knn_k=16,
         )

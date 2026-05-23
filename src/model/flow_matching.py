@@ -24,18 +24,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .egnn import SBDDEGNN
+from .egnn import SE3EGNN
 from .pocket_encoder import PocketEncoder
 from .utils import subtract_com
 
 
 class FlowMatching(nn.Module):
-    """Full Flow Matching model wrapping PocketEncoder + SBDDEGNN.
+    """Full Flow Matching model wrapping PocketEncoder + SE3EGNN.
 
     Parameters
     ----------
     pocket_encoder : PocketEncoder instance
-    egnn           : SBDDEGNN instance
+    egnn           : SE3EGNN instance
     num_steps      : Euler integration steps for sampling (default 50)
     sigma_min      : minimum noise scale (default 1e-5)
     """
@@ -43,7 +43,7 @@ class FlowMatching(nn.Module):
     def __init__(
         self,
         pocket_encoder: PocketEncoder,
-        egnn: SBDDEGNN,
+        egnn: SE3EGNN,
         num_steps: int = 50,
         sigma_min: float = 1e-5,
     ):
