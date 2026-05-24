@@ -112,9 +112,14 @@ class FlowMatching(nn.Module):
     # Training step
     # ──────────────────────────────────────────────────────────────────────
 
-    def forward(self, *args, **kwargs):
-        """Alias for compute_loss to support PyTorch DistributedDataParallel."""
-        return self.compute_loss(*args, **kwargs)
+    def forward(self, *args, mode="flow", **kwargs):
+        """Dispatch to appropriate loss method to support PyTorch DistributedDataParallel."""
+        if mode == "flow":
+            return self.compute_loss(*args, **kwargs)
+        elif mode == "contrastive":
+            return self.compute_contrastive_loss(*args, **kwargs)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
 
     def compute_loss(
         self,

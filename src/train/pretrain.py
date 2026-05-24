@@ -93,7 +93,7 @@ def pretrain(
     is_main_process = local_rank in [-1, 0]
 
     if local_rank != -1:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
         sampler = DistributedSampler(train_dataset, shuffle=True)
     else:
         sampler = None
@@ -220,10 +220,11 @@ def pretrain(
             pair = train_dataset.sample_contrastive_pair()
             if pair is not None:
                 with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
-                    c_loss = model.compute_contrastive_loss(**{
+                    pair_kwargs = {
                         k: v.to(device) if isinstance(v, torch.Tensor) else v
                         for k, v in pair.items()
-                    })
+                    }
+                    c_loss = model(mode="contrastive", **pair_kwargs)
                 (0.05 * c_loss).backward()  # λ_contrastive = 0.05
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
