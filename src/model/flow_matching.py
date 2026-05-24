@@ -112,6 +112,10 @@ class FlowMatching(nn.Module):
     # Training step
     # ──────────────────────────────────────────────────────────────────────
 
+    def forward(self, *args, **kwargs):
+        """Alias for compute_loss to support PyTorch DistributedDataParallel."""
+        return self.compute_loss(*args, **kwargs)
+
     def compute_loss(
         self,
         pocket_pos: torch.Tensor,      # (sum N_P, 3)

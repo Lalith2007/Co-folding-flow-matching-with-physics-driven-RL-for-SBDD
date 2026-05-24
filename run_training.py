@@ -338,12 +338,23 @@ Examples:
     # Load config
     cfg = load_config(args.config)
 
-    # Device
-    device = args.device or cfg["hardware"]["device"]
-    if device == "cuda" and not torch.cuda.is_available():
-        logger.warning("CUDA not available, falling back to CPU")
-        device = "cpu"
-    logger.info(f"Device: {device}")
+    # DDP Initialization
+    import os
+    import torch.distributed as dist
+
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if local_rank != -1:
+        dist.init_process_group(backend="nccl")
+        device = f"cuda:{local_rank}"
+        torch.cuda.set_device(device)
+        logger.info(f"DDP Initialized. Rank: {local_rank}, Device: {device}")
+    else:
+        # Device
+        device = args.device or cfg["hardware"]["device"]
+        if device == "cuda" and not torch.cuda.is_available():
+            logger.warning("CUDA not available, falling back to CPU")
+            device = "cpu"
+        logger.info(f"Device: {device}")
 
     if torch.cuda.is_available():
         logger.info(f"GPU: {torch.cuda.get_device_name(0)}")

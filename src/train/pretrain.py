@@ -83,10 +83,25 @@ def pretrain(
     if use_amp:
         logger.info(f"Mixed precision enabled: {amp_dtype}")
 
+    # ── DDP Setup ──
+    import os
+    import torch.distributed as dist
+    from torch.utils.data.distributed import DistributedSampler
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    is_main_process = local_rank in [-1, 0]
+
+    if local_rank != -1:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        sampler = DistributedSampler(train_dataset, shuffle=True)
+    else:
+        sampler = None
+
     # Disjoint union collation — DataLoader handles true batching now
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=2,
-        pin_memory=True, collate_fn=collate_skip_none, drop_last=True,
+        train_dataset, batch_size=batch_size, shuffle=(sampler is None), num_workers=2,
+        pin_memory=True, collate_fn=collate_skip_none, drop_last=True, sampler=sampler
     )
     train_iter = iter(train_loader)
 
@@ -108,8 +123,11 @@ def pretrain(
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, get_lr_scale)
 
-    from tqdm import tqdm
-    pbar = tqdm(total=max_steps, initial=start_step, desc="Pretraining Phase A")
+    if is_main_process:
+        from tqdm import tqdm
+        pbar = tqdm(total=max_steps, initial=start_step, desc="Pretraining Phase A")
+    else:
+        pbar = None
 
     while step < max_steps:
         try:
@@ -137,7 +155,7 @@ def pretrain(
         optimizer.zero_grad()
 
         with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
-            losses = model.compute_loss(
+            losses = model(
                 pocket_pos=pocket_pos,
                 pocket_feat=pocket_feat,
                 ligand_pos=ligand_pos,
@@ -156,7 +174,8 @@ def pretrain(
 
         # Guard: skip step if loss is NaN to prevent poisoning model weights
         if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
-            logger.warning(f"NaN/Inf loss at step {step+1}, skipping batch")
+            if is_main_process:
+                logger.warning(f"NaN/Inf loss at step {step+1}, skipping batch")
             continue
 
         # bf16 doesn't need GradScaler, but fp16 does
@@ -174,7 +193,8 @@ def pretrain(
                 break
 
         if not grad_ok:
-            logger.warning(f"NaN/Inf gradient at step {step+1}, skipping update")
+            if is_main_process:
+                logger.warning(f"NaN/Inf gradient at step {step+1}, skipping update")
             optimizer.zero_grad()
             continue
 
@@ -188,7 +208,8 @@ def pretrain(
         scheduler.step()
 
         step += 1
-        pbar.update(1)
+        if is_main_process:
+            pbar.update(1)
         accum_loss += losses["total_loss"].item()
         accum_flow += losses["flow_loss"].item()
         accum_aff += losses["affinity_loss"].item()
@@ -208,7 +229,7 @@ def pretrain(
                 optimizer.step()
 
         # ── Logging ──
-        if step % 100 == 0:
+        if step % 100 == 0 and is_main_process:
             avg_loss = accum_loss / 100
             avg_flow = accum_flow / 100
             avg_aff = accum_aff / 100
@@ -232,30 +253,35 @@ def pretrain(
             accum_aff = 0.0
 
         # ── Evaluation ──
-        if step % eval_every == 0 and val_dataset is not None:
-            val_loss = evaluate(model, val_dataset, device, reward_offset, reward_scale)
+        if step % eval_every == 0 and val_dataset is not None and is_main_process:
+            # We must unwrap model for evaluation because DDP forward is train-only
+            eval_model = model.module if local_rank != -1 else model
+            val_loss = evaluate(eval_model, val_dataset, device, reward_offset, reward_scale)
             logger.info(f"  [VAL] Step {step} | val_loss={val_loss:.4f}")
             model.train()
 
         # ── Checkpointing ──
-        if step % save_every == 0:
+        if step % save_every == 0 and is_main_process:
             ckpt_path = save_path / f"pretrain_step{step}.pt"
+            save_model = model.module if local_rank != -1 else model
             torch.save({
                 "step": step,
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": save_model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
             }, ckpt_path)
             logger.info(f"  Saved checkpoint: {ckpt_path}")
 
     # Save final checkpoint (θ₀ — frozen reference for RL)
-    final_path = save_path / "pretrain_final.pt"
-    torch.save({
-        "step": step,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-    }, final_path)
-    logger.info(f"Pretraining complete. Final checkpoint: {final_path}")
-    pbar.close()
+    if is_main_process:
+        final_path = save_path / "pretrain_final.pt"
+        save_model = model.module if local_rank != -1 else model
+        torch.save({
+            "step": step,
+            "model_state_dict": save_model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+        }, final_path)
+        logger.info(f"Pretraining complete. Final checkpoint: {final_path}")
+        if pbar: pbar.close()
 
     return model
 
