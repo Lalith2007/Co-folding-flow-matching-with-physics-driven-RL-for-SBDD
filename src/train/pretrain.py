@@ -99,11 +99,12 @@ def pretrain(
         sampler = None
 
     # Disjoint union collation — DataLoader handles true batching now
+    # Use num_workers=0 in DDP to avoid NCCL + fork() conflicts
+    n_workers = 0 if local_rank != -1 else 2
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=(sampler is None), num_workers=2,
+        train_dataset, batch_size=batch_size, shuffle=(sampler is None), num_workers=n_workers,
         pin_memory=True, collate_fn=collate_skip_none, drop_last=True, sampler=sampler
     )
-    train_iter = iter(train_loader)
 
     step = start_step
     accum_loss = 0.0
@@ -129,10 +130,20 @@ def pretrain(
     else:
         pbar = None
 
+    # Synchronize all ranks before entering the training loop
+    if local_rank != -1:
+        dist.barrier()
+
+    epoch = 0
+    train_iter = iter(train_loader)
+
     while step < max_steps:
         try:
             sample = next(train_iter)
         except StopIteration:
+            epoch += 1
+            if sampler is not None:
+                sampler.set_epoch(epoch)  # reshuffle for DDP
             train_iter = iter(train_loader)
             sample = next(train_iter)
 
@@ -173,10 +184,13 @@ def pretrain(
             )
 
         # Guard: skip step if loss is NaN to prevent poisoning model weights
-        if torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"]):
+        # In DDP we must still call backward to keep ranks in sync, so we
+        # zero the loss instead of using `continue`
+        bad_loss = torch.isnan(losses["total_loss"]) or torch.isinf(losses["total_loss"])
+        if bad_loss:
             if is_main_process:
-                logger.warning(f"NaN/Inf loss at step {step+1}, skipping batch")
-            continue
+                logger.warning(f"NaN/Inf loss at step {step+1}, zeroing gradients")
+            losses["total_loss"] = losses["total_loss"] * 0.0  # keep graph alive but zero
 
         # bf16 doesn't need GradScaler, but fp16 does
         if use_amp and amp_dtype == torch.float16:
@@ -194,37 +208,40 @@ def pretrain(
 
         if not grad_ok:
             if is_main_process:
-                logger.warning(f"NaN/Inf gradient at step {step+1}, skipping update")
+                logger.warning(f"NaN/Inf gradient at step {step+1}, zeroing gradients")
             optimizer.zero_grad()
-            continue
+            # Don't `continue` — fall through to keep ranks in sync
 
-        # Gradient clipping
-        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        if use_amp and amp_dtype == torch.float16:
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            optimizer.step()
+        if not bad_loss and grad_ok:
+            # Gradient clipping
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            if use_amp and amp_dtype == torch.float16:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
         scheduler.step()
 
         step += 1
         if is_main_process:
             pbar.update(1)
-        accum_loss += losses["total_loss"].item()
-        accum_flow += losses["flow_loss"].item()
-        accum_aff += losses["affinity_loss"].item()
+        if not bad_loss:
+            accum_loss += losses["total_loss"].item()
+            accum_flow += losses["flow_loss"].item()
+            accum_aff += losses["affinity_loss"].item()
 
-        # ── Contrastive ranking loss (every 4th step) ──
-        if step % 4 == 0 and hasattr(train_dataset, 'contrastive_pairs'):
+        # ── Contrastive ranking loss (every 4th step, single-GPU only) ──
+        # Disabled in DDP because each rank samples a different contrastive
+        # pair, which causes a deadlock when they call model() with mismatched data
+        if local_rank == -1 and step % 4 == 0 and hasattr(train_dataset, 'contrastive_pairs'):
             optimizer.zero_grad()
             pair = train_dataset.sample_contrastive_pair()
             if pair is not None:
                 with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
-                    pair_kwargs = {
+                    c_loss = model.compute_contrastive_loss(**{
                         k: v.to(device) if isinstance(v, torch.Tensor) else v
                         for k, v in pair.items()
-                    }
-                    c_loss = model(mode="contrastive", **pair_kwargs)
+                    })
                 (0.05 * c_loss).backward()  # λ_contrastive = 0.05
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
