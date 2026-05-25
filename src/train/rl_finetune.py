@@ -280,13 +280,15 @@ def rl_finetune(
                         t=t_mid,
                         h_P=h_P_ref,
                     )
-                    cur_out = model.egnn(
-                        x_L=z_coord_ref,
-                        h_L_raw=h_L_raw,
-                        atom_types_onehot=z_type.detach(),
-                        t=t_mid,
-                        h_P=h_P,
-                    )
+                
+                # Compute current model's output WITH gradients so the KL penalty can backpropagate
+                cur_out = model.egnn(
+                    x_L=z_coord_ref,
+                    h_L_raw=h_L_raw,
+                    atom_types_onehot=z_type.detach(),
+                    t=t_mid,
+                    h_P=h_P,
+                )
 
                 kl_loss = F.mse_loss(cur_out["vel_coord"], ref_out["vel_coord"])
 
