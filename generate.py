@@ -29,6 +29,10 @@ from typing import List, Optional, Dict
 import numpy as np
 import torch
 import yaml
+import torch.nn.functional as F
+
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')  # Suppress noisy C++ valence errors
 
 logging.basicConfig(
     level=logging.INFO,
