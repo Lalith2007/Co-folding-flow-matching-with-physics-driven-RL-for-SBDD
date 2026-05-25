@@ -357,9 +357,11 @@ class FlowMatching(nn.Module):
             # Re-centre CoM of ligand (optional but good practice)
             z_coord = z_coord - z_coord.mean(dim=0, keepdim=True)
 
-        # Decode atom types — clean argmax (no inference hacks needed
-        # after proper retraining with type_loss_weight=5.0)
-        atom_types = z_type.argmax(dim=-1)  # (N_L,)
+        # Decode atom types via temperature sampling instead of hard argmax
+        # to break MSE mean-collapse and allow RL to explore non-Carbon atoms.
+        temperature = 0.5  # sharpens the distribution slightly
+        probs = F.softmax(z_type / temperature, dim=-1)
+        atom_types = torch.multinomial(probs, 1).squeeze(-1)
 
         # Get final affinity prediction
         pK_pred = out["pK_pred"]
