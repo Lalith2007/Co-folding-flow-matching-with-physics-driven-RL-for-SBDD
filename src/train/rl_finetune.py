@@ -36,6 +36,9 @@ from ..model.flow_matching import FlowMatching
 from ..model.reward import RewardOracle
 from ..model.utils import CosineBetaSchedule
 
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')  # Suppress noisy C++ valence errors
+
 logger = logging.getLogger(__name__)
 
 
