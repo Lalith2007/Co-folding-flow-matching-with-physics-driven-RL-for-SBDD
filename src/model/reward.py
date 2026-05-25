@@ -216,7 +216,8 @@ class RewardOracle:
             from rdkit import Chem
             import os
 
-            # 1. Prepare Ligand PDBQT
+            # 1. Prepare Ligand PDBQT (Requires explicit Hydrogens)
+            mol = Chem.AddHs(mol, addCoords=True)
             prep = MoleculePreparation()
             prep.prepare(mol)
             ligand_pdbqt = prep.write_pdbqt_string()
