@@ -178,32 +178,17 @@ def rl_finetune(
             for gen in candidates:
                 # Reconstruct RDKit molecule for chemical metrics
                 try:
-                    from rdkit import Chem
-                    from rdkit.Geometry import Point3D
-                    from ..data.featurizer import LIGAND_ATOM_TYPES
-
+                    from generate import coords_to_rdkit_mol
+                    
                     pos_np = gen["pos"].cpu().numpy()
                     types_np = gen["atom_types"].cpu().numpy()
 
-                    mol = Chem.RWMol()
-                    conf = Chem.Conformer(len(pos_np))
-                    for i, (p, t) in enumerate(zip(pos_np, types_np)):
-                        elem = LIGAND_ATOM_TYPES[t] if t < len(LIGAND_ATOM_TYPES) else "C"
-                        atom_num = Chem.GetPeriodicTable().GetAtomicNumber(elem)
-                        mol.AddAtom(Chem.Atom(atom_num))
-                        conf.SetAtomPosition(i, Point3D(float(p[0]), float(p[1]), float(p[2])))
-                    mol.AddConformer(conf, assignId=True)
+                    mol, sanitized = coords_to_rdkit_mol(pos_np, types_np)
+                    if not sanitized or mol is None:
+                        raise ValueError("Failed to sanitize molecule")
 
-                    try:
-                        from rdkit.Chem import rdDetermineBonds
-                        rdDetermineBonds.DetermineBonds(mol.GetMol())
-                        mol = Chem.RWMol(mol.GetMol())
-                    except Exception:
-                        pass
-
-                    Chem.SanitizeMol(mol)
                     reward_dict = reward_oracle.compute_rl_reward(
-                        mol=mol.GetMol(),
+                        mol=mol,
                         pK_pred=gen["pK_pred"],
                         pocket_path=str(pocket_path),
                         pocket_pos_updated=gen.get("pocket_pos_updated"),
