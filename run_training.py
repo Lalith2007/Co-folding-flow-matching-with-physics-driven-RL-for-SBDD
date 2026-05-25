@@ -69,7 +69,7 @@ def build_model(cfg: dict, device: str) -> "FlowMatching":
     )
 
     egnn = SE3EGNN(
-        ligand_in_dim=20,  # 16 elem + 1 aromatic + 1 degree + 1 charge + 1 ring
+        ligand_in_dim=4,  # 4 non-element features: aromatic, degree, charge, ring
         pocket_dim=cfg["egnn"]["hidden_dim"],
         hidden_dim=cfg["egnn"]["hidden_dim"],
         num_layers=cfg["egnn"]["num_layers"],

@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 
 # ── Default P2Rank installation directory ──
 _DEFAULT_P2RANK_DIR = Path.home() / ".sbdd_tools" / "p2rank"
-_P2RANK_VERSION = "2.4.2"
+_P2RANK_VERSION = "2.5.1"
 _P2RANK_URL = (
     f"https://github.com/rdk/p2rank/releases/download/"
-    f"v{_P2RANK_VERSION}/p2rank_{_P2RANK_VERSION}.tar.gz"
+    f"{_P2RANK_VERSION}/p2rank_{_P2RANK_VERSION}.tar.gz"
 )
 
 

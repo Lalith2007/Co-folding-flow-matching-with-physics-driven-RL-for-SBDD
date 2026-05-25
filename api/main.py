@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ──
 CHECKPOINT_PATH = os.environ.get(
-    "SBDD_CHECKPOINT", "checkpoints/pretrain_final.pt"
+    "SBDD_CHECKPOINT", "checkpoints/rl_final.pt"
 )
 DEVICE = os.environ.get("SBDD_DEVICE", "auto")
 P2RANK_HOME = os.environ.get("PRANK_HOME", None)

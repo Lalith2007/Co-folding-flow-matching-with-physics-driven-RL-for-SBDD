@@ -184,10 +184,23 @@ class FlowMatching(nn.Module):
         if self.training and ligand_bonds is not None and torch.rand(1).item() < bond_dropout:
             ligand_bonds = torch.zeros_like(ligand_bonds)
 
+        # CRITICAL: Strip element one-hot (first 16 dims) from ligand features
+        # to prevent the model from "cheating" by reading ground-truth atom types
+        # from h_L_raw. Only non-element features (aromatic, degree, charge, ring)
+        # are kept. This forces the model to learn atom types exclusively from
+        # the categorical flow in atom_types_onehot.
+        ligand_feat_clean = ligand_feat[:, 16:]  # (N_L, 4): aromatic, degree, charge, ring
+
+        # Feature dropout: zero out ligand features 50% of the time during training
+        # to match inference conditions where h_L_raw is always zeros.
+        # This prevents a train-test distribution gap.
+        if self.training and torch.rand(1).item() < 0.5:
+            ligand_feat_clean = torch.zeros_like(ligand_feat_clean)
+
         # Predict velocity
         model_out = self.egnn(
             x_L=interp["z_t_coord"],
-            h_L_raw=ligand_feat,
+            h_L_raw=ligand_feat_clean,
             atom_types_onehot=interp["z_t_type"],
             t=t,
             h_P=h_P,
@@ -265,8 +278,10 @@ class FlowMatching(nn.Module):
             subtract_com(ligand_pos_a), ligand_types_a, t,
             num_atom_types=self.egnn.num_atom_types,
         )
+        # Strip element one-hot from ligand features (same as compute_loss)
+        ligand_feat_a_clean = ligand_feat_a[:, 16:]
         out_a = self.egnn(
-            x_L=interp_a["z_t_coord"], h_L_raw=ligand_feat_a,
+            x_L=interp_a["z_t_coord"], h_L_raw=ligand_feat_a_clean,
             atom_types_onehot=interp_a["z_t_type"], t=t, h_P=h_P,
             ligand_bonds=ligand_bonds_a,
         )
@@ -276,8 +291,9 @@ class FlowMatching(nn.Module):
             subtract_com(ligand_pos_b), ligand_types_b, t,
             num_atom_types=self.egnn.num_atom_types,
         )
+        ligand_feat_b_clean = ligand_feat_b[:, 16:]
         out_b = self.egnn(
-            x_L=interp_b["z_t_coord"], h_L_raw=ligand_feat_b,
+            x_L=interp_b["z_t_coord"], h_L_raw=ligand_feat_b_clean,
             atom_types_onehot=interp_b["z_t_type"], t=t, h_P=h_P,
             ligand_bonds=ligand_bonds_b,
         )
@@ -303,7 +319,7 @@ class FlowMatching(nn.Module):
         pocket_pos: torch.Tensor,     # (N_P, 3)
         pocket_feat: torch.Tensor,    # (N_P, F_P)
         num_atoms: int = None,        # override number of ligand atoms
-        ligand_feat_dim: int = 20,    # raw ligand feature dim
+        ligand_feat_dim: int = 4,     # non-element ligand features (aromatic, degree, charge, ring)
     ) -> dict:
         """Generate a molecule via 50-step Euler integration.
 
@@ -331,7 +347,7 @@ class FlowMatching(nn.Module):
         z_coord = z_coord - z_coord.mean(dim=0, keepdim=True)  # zero CoM
         z_type = torch.ones(N_L, self.egnn.num_atom_types, device=device) / self.egnn.num_atom_types
 
-        # Dummy ligand features (will be refined during sampling)
+        # Dummy ligand features (no element info — just chemical properties)
         h_L_raw = torch.zeros(N_L, ligand_feat_dim, device=device)
 
         dt = 1.0 / self.num_steps
@@ -354,14 +370,11 @@ class FlowMatching(nn.Module):
             z_type = z_type + out["vel_type"] * dt
             pocket_pos = pocket_pos + out["vel_pocket"] * dt
 
-            # Re-centre CoM of ligand (optional but good practice)
+            # Re-centre CoM of ligand
             z_coord = z_coord - z_coord.mean(dim=0, keepdim=True)
 
-        # Decode atom types via temperature sampling instead of hard argmax
-        # to break MSE mean-collapse and allow RL to explore non-Carbon atoms.
-        temperature = 0.5  # sharpens the distribution slightly
-        probs = F.softmax(z_type / temperature, dim=-1)
-        atom_types = torch.multinomial(probs, 1).squeeze(-1)
+        # Decode atom types via argmax (model should now produce meaningful predictions)
+        atom_types = z_type.argmax(dim=-1)
 
         # Get final affinity prediction
         pK_pred = out["pK_pred"]
@@ -374,3 +387,4 @@ class FlowMatching(nn.Module):
             "num_atoms": N_L,
             "pocket_pos_updated": pocket_pos.detach(),
         }
+

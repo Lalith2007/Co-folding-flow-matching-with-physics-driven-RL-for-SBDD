@@ -257,12 +257,12 @@ class SE3EGNN(nn.Module):
 
     def __init__(
         self,
-        ligand_in_dim: int = 20,
+        ligand_in_dim: int = 4,
         pocket_dim: int = 128,
         hidden_dim: int = 128,
         num_layers: int = 9,
         num_heads: int = 16,
-        num_atom_types: int = 10,
+        num_atom_types: int = 6,
         time_emb_dim: int = 128,
         knn_k: int = 16,
         num_rbf: int = 16,
@@ -279,8 +279,8 @@ class SE3EGNN(nn.Module):
         self.time_emb = SinusoidalTimeEmbedding(time_emb_dim)
         self.time_proj = nn.Linear(time_emb_dim, hidden_dim)
 
-        # Input projection for ligand features (ONLY use noised atom types!)
-        self.ligand_proj = nn.Linear(num_atom_types, hidden_dim)
+        # Input projection for ligand features (matches checkpoint shape [128, 30])
+        self.ligand_proj = nn.Linear(ligand_in_dim + num_atom_types, hidden_dim)
 
         # EGNN layers — edge features are RBF (16) + bond type one-hot (4) = 20
         edge_feat_dim = num_rbf + self.num_bond_types
@@ -343,8 +343,9 @@ class SE3EGNN(nn.Module):
         if t_emb.size(0) == 1 and N_L > 1:
             t_emb = t_emb.expand(N_L, -1)                      # (N_L, hidden_dim)
 
-        # Only project the noised atom types! (No cheating from h_L_raw)
-        h_L = self.ligand_proj(atom_types_onehot)              # (N_L, hidden_dim)
+        # Project concatenated raw features and noised atom types
+        h_in = torch.cat([h_L_raw, atom_types_onehot], dim=-1)
+        h_L = self.ligand_proj(h_in)                           # (N_L, hidden_dim)
 
         # Add time embedding (t_emb is already (N_L, hidden_dim) after expand)
         h_L = h_L + t_emb

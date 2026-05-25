@@ -324,12 +324,12 @@ def rl_finetune(
             pbar.set_postfix({
                 "R": f"{avg_r:.3f}",
                 "rl": f"{avg_rl:.4f}",
-                "kl": f"{avg_kl:.8f}"
+                "kl": f"{avg_kl:.4f}"
             })
 
             logger.info(
                 f"RL Step {step}/{max_steps} | "
-                f"R={avg_r:.3f} rl_loss={avg_rl:.4f} kl={avg_kl:.8f} "
+                f"R={avg_r:.3f} rl_loss={avg_rl:.4f} kl={avg_kl:.4f} "
                 f"β={beta:.4f} | {elapsed:.0f}s"
             )
 

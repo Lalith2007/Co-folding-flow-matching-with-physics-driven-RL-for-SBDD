@@ -82,7 +82,7 @@ def load_model(config_path: str, checkpoint_path: str, device: str = "cuda"):
     )
 
     egnn = SE3EGNN(
-        ligand_in_dim=20,
+        ligand_in_dim=4,  # non-element features only (aromatic, degree, charge, ring)
         pocket_dim=cfg["egnn"]["hidden_dim"],
         hidden_dim=cfg["egnn"]["hidden_dim"],
         num_layers=cfg["egnn"]["num_layers"],

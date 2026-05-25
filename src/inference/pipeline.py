@@ -78,7 +78,7 @@ class InferencePipeline:
             in_dim=40, hidden_dim=128, num_layers=4, knn_k=16,
         )
         egnn = SE3EGNN(
-            ligand_in_dim=20, hidden_dim=128, num_layers=9,
+            ligand_in_dim=4, hidden_dim=128, num_layers=9,
             num_heads=16, num_atom_types=6, knn_k=16,
         )
         model = FlowMatching(
