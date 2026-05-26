@@ -95,14 +95,20 @@ def pretrain(
     if local_rank != -1:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
         sampler = DistributedSampler(train_dataset, shuffle=True)
+        # Auto-halve per-GPU batch size so the effective global batch stays
+        # the same as single-GPU training (e.g., 32 total = 16/GPU × 2 GPUs).
+        world_size = dist.get_world_size()
+        per_gpu_batch = max(1, batch_size // world_size)
+        logger.info(f"DDP: {world_size} GPUs, per-GPU batch={per_gpu_batch} (global effective={per_gpu_batch * world_size})")
     else:
         sampler = None
+        per_gpu_batch = batch_size
 
     # Disjoint union collation — DataLoader handles true batching now
     # Use num_workers=0 in DDP to avoid NCCL + fork() conflicts
     n_workers = 0 if local_rank != -1 else 2
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=(sampler is None), num_workers=n_workers,
+        train_dataset, batch_size=per_gpu_batch, shuffle=(sampler is None), num_workers=n_workers,
         pin_memory=True, collate_fn=collate_skip_none, drop_last=True, sampler=sampler
     )
 
