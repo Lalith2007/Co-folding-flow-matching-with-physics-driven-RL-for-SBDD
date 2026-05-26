@@ -164,10 +164,12 @@ class FlowMatching(nn.Module):
         t = torch.rand(1, device=device).clamp(min=self.sigma_min, max=1.0 - self.sigma_min)
 
         # ── Pocket Flexibility (Induced Fit) ──
-        # Noise the pocket coordinates slightly to learn co-folding
-        z_noise_pocket = torch.randn_like(pocket_pos)
-        z_t_pocket = (1 - t) * z_noise_pocket + t * pocket_pos
-        u_t_pocket = pocket_pos - z_noise_pocket
+        # BUG FIX: Previously, this applied a full flow from N(0,1) to the pocket,
+        # completely destroying the pocket condition at t=0 and causing loss explosions.
+        # Now, we only add a tiny 0.1A jitter for data augmentation.
+        z_noise_pocket = torch.randn_like(pocket_pos) * 0.1
+        z_t_pocket = pocket_pos + z_noise_pocket
+        u_t_pocket = -z_noise_pocket  # Target velocity points back to true pocket
 
         # Encode pocket with noised coordinates
         pocket_out = self.pocket_encoder(z_t_pocket, pocket_feat, batch_P=batch_P)
