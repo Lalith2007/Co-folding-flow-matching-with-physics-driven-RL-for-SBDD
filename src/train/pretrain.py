@@ -105,8 +105,9 @@ def pretrain(
         per_gpu_batch = batch_size
 
     # Disjoint union collation — DataLoader handles true batching now
-    # Use num_workers=0 in DDP to avoid NCCL + fork() conflicts
-    n_workers = 0 if local_rank != -1 else 2
+    # num_workers=0 required in JupyterLab/container environments to prevent
+    # silent fork() deadlocks. The GPU is the bottleneck anyway, not data loading.
+    n_workers = 0
     train_loader = DataLoader(
         train_dataset, batch_size=per_gpu_batch, shuffle=(sampler is None), num_workers=n_workers,
         pin_memory=True, collate_fn=collate_skip_none, drop_last=True, sampler=sampler
