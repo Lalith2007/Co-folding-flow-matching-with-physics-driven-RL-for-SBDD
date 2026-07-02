@@ -71,10 +71,10 @@ def main():
     # 5. Push tensors to GPU
     print("\nMoving tensors to CUDA...")
     try:
-        pocket_pos = sample["pocket_pos"].unsqueeze(0).to(device) if sample["pocket_pos"].dim() == 2 else sample["pocket_pos"].to(device)
-        pocket_feat = sample["pocket_feat"].unsqueeze(0).to(device) if sample["pocket_feat"].dim() == 2 else sample["pocket_feat"].to(device)
-        ligand_pos = sample["ligand_pos"].unsqueeze(0).to(device) if sample["ligand_pos"].dim() == 2 else sample["ligand_pos"].to(device)
-        ligand_feat = sample["ligand_feat"].unsqueeze(0).to(device) if sample["ligand_feat"].dim() == 2 else sample["ligand_feat"].to(device)
+        pocket_pos = sample["pocket_pos"].to(device)
+        pocket_feat = sample["pocket_feat"].to(device)
+        ligand_pos = sample["ligand_pos"].to(device)
+        ligand_feat = sample["ligand_feat"].to(device)
         ligand_types = sample["ligand_atom_types"].to(device)
         affinity = sample["affinity"].to(device)
         weight = sample["weight"].to(device)
