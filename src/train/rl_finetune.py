@@ -225,7 +225,7 @@ def rl_finetune(
                 z_type = torch.ones(
                     N_L, model.egnn.num_atom_types, device=device
                 ) / model.egnn.num_atom_types
-                h_L_raw = torch.zeros(N_L, 20, device=device)
+                h_L_raw = torch.zeros(N_L, 4, device=device)  # 4 non-element features: aromatic, degree, charge, ring
 
                 # Use fewer ODE steps for RL (20 vs 50) — faster, still good enough
                 rl_num_steps = 20
