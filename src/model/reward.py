@@ -270,8 +270,13 @@ class RewardOracle:
                     return 0.0
                 
                 prep_rec = MoleculePreparation(is_macrocycle=True) # Trick to avoid rotating bonds
-                prep_rec.prepare(receptor_mol)
-                rec_string = prep_rec.write_pdbqt_string()
+                rec_prep_result = prep_rec.prepare(receptor_mol)
+                if isinstance(rec_prep_result, list):
+                    if not rec_prep_result:
+                        return 0.0
+                    rec_string = rec_prep_result[0].write_pdbqt_string()
+                else:
+                    rec_string = prep_rec.write_pdbqt_string()
                 
                 # We need a temp file for the receptor because Vina requires a file path
                 fd, temp_rec_path = tempfile.mkstemp(suffix='.pdbqt')
