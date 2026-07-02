@@ -219,8 +219,16 @@ class RewardOracle:
             # 1. Prepare Ligand PDBQT (Requires explicit Hydrogens)
             mol = Chem.AddHs(mol, addCoords=True)
             prep = MoleculePreparation()
-            prep.prepare(mol)
-            ligand_pdbqt = prep.write_pdbqt_string()
+            # Meeko API changed in v0.5+: prepare() now returns a list
+            mol_prep_result = prep.prepare(mol)
+            if isinstance(mol_prep_result, list):
+                # New API (meeko >= 0.5): result is list of MoleculePreparation
+                if not mol_prep_result:
+                    return 0.0
+                ligand_pdbqt = mol_prep_result[0].write_pdbqt_string()
+            else:
+                # Old API (meeko < 0.5): result is None, call write on prep
+                ligand_pdbqt = prep.write_pdbqt_string()
 
             # 2. Prepare Receptor PDBQT
             pocket_path_obj = Path(pocket_path)
