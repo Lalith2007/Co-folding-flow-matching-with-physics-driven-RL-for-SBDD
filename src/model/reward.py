@@ -99,6 +99,8 @@ class RewardOracle:
         self.max_nn_bonds = max_nn_bonds
         self.max_sa_score = max_sa_score
         self.max_ring_nitrogen = max_ring_nitrogen
+        self.max_carbon_ratio = 0.85   # >85% carbon = carbon collapse penalty
+        self.min_heteroatoms = 1       # must have ≥1 N or O atom
 
         # Pre-compile PAINS and medchem alert patterns
         self._pains_patterns = None
@@ -667,9 +669,27 @@ class RewardOracle:
         # ── Soft carbon ratio penalty (continuous, not flat) ──
         n_total = mol.GetNumAtoms()
         n_carbon = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() == 6)
+        n_oxygen = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() == 8)
+        n_heteroatoms = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() in (7, 8, 9, 16, 17))
         carbon_ratio = n_carbon / max(n_total, 1)
-        # Smooth: 0.0 at 0% carbon, 1.0 at ≥40% carbon
-        carbon_score = min(1.0, carbon_ratio / self.min_carbon_ratio)
+
+        # Hard gate: require at least 1 N or O atom — prevents pure-carbon collapse
+        if n_heteroatoms < self.min_heteroatoms:
+            return {
+                "total_reward": 0.0,
+                "r_qed": 0.0, "r_sa": 0.0, "r_lipinski": 0.0,
+                "r_proxy": 0.0, "r_diversity": 0.0,
+                "gate_reason": "no_heteroatoms",
+            }
+
+        # Bell-shaped carbon score: peaks at [min_carbon, max_carbon], decays outside
+        if carbon_ratio < self.min_carbon_ratio:
+            carbon_score = max(0.0, carbon_ratio / self.min_carbon_ratio)
+        elif carbon_ratio <= self.max_carbon_ratio:
+            carbon_score = 1.0  # optimal range
+        else:
+            # Decay from 1.0 at max_carbon_ratio to 0.0 at 100% carbon
+            carbon_score = max(0.0, 1.0 - (carbon_ratio - self.max_carbon_ratio) / (1.0 - self.max_carbon_ratio))
 
         # ── Soft nitrogen ratio penalty (continuous) ──
         n_nitrogen = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() == 7)
