@@ -32,7 +32,23 @@ import yaml
 import torch.nn.functional as F
 
 from rdkit import RDLogger
-RDLogger.DisableLog('rdApp.*')  # Suppress noisy C++ valence errors
+RDLogger.DisableLog('rdApp.*')  # Suppress Python-level RDKit logs
+
+import os as _os
+from contextlib import contextmanager as _contextmanager
+
+@_contextmanager
+def _suppress_c_stderr():
+    """Redirect C-level fd 2 to /dev/null to silence RDKit/meeko C++ valence spam."""
+    devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
+    old_stderr_fd = _os.dup(2)
+    try:
+        _os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        _os.dup2(old_stderr_fd, 2)
+        _os.close(devnull_fd)
+        _os.close(old_stderr_fd)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -157,9 +173,10 @@ def _build_mol_with_rdkit_bonds(pos, elements):
 
     try:
         # Infer connectivity AND bond orders from 3D geometry
-        rdDetermineBonds.DetermineConnectivity(mol)
-        rdDetermineBonds.DetermineBondOrders(mol)
-        Chem.SanitizeMol(mol)
+        with _suppress_c_stderr():
+            rdDetermineBonds.DetermineConnectivity(mol)
+            rdDetermineBonds.DetermineBondOrders(mol)
+            Chem.SanitizeMol(mol)
         return mol.GetMol()
     except Exception:
         return None
@@ -197,7 +214,8 @@ def _build_mol_distance_based(pos, elements, bond_tolerance=0.15):
     while True:
         try:
             mol_copy = Chem.Mol(mol)
-            Chem.SanitizeMol(mol_copy)
+            with _suppress_c_stderr():
+                Chem.SanitizeMol(mol_copy)
             return mol_copy
         except Exception:
             pass
