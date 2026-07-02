@@ -207,38 +207,68 @@ class RewardOracle:
         """Run AutoDock Vina and return normalised score.
 
         r_vina = (|score| - 6) / 7,  clamped to [0, 1].
+        Falls back to 0.0 on any failure (Vina not installed, bad molecule, etc.)
         """
+        import os
+        import sys
+        import io
+        import tempfile
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _suppress_c_stderr():
+            """Redirect C-level fd 2 (stderr) to /dev/null to silence meeko/RDKit C++ spam."""
+            devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            old_stderr_fd = os.dup(2)
+            try:
+                os.dup2(devnull_fd, 2)
+                yield
+            finally:
+                os.dup2(old_stderr_fd, 2)
+                os.close(devnull_fd)
+                os.close(old_stderr_fd)
+
+        def _mol_to_pdbqt_string(rdkit_mol):
+            """Convert an RDKit mol to PDBQT string, handling all meeko API versions."""
+            from meeko import MoleculePreparation
+            prep = MoleculePreparation()
+            result = prep.prepare(rdkit_mol)
+            # meeko < 0.5: prepare() returns None; call write_pdbqt_string() on prep
+            if result is None:
+                return prep.write_pdbqt_string()
+            # meeko 0.5.x: returns list; each item has write_pdbqt_string()
+            if isinstance(result, list) and result:
+                item = result[0]
+                if hasattr(item, 'write_pdbqt_string'):
+                    return item.write_pdbqt_string()
+                # meeko 0.6+: item is MoleculeSetup; need PDBQTWriterLegacy
+                try:
+                    from meeko import PDBQTWriterLegacy
+                    pdbqt_str, is_ok, err = PDBQTWriterLegacy.write_string(item)
+                    if is_ok:
+                        return pdbqt_str
+                except (ImportError, Exception):
+                    pass
+            raise RuntimeError("Could not write PDBQT with any known meeko API")
+
         try:
             from vina import Vina
-            from meeko import MoleculePreparation
-            import tempfile
-            from pathlib import Path
             from rdkit import Chem
-            import os
+            from pathlib import Path
 
-            # 1. Prepare Ligand PDBQT (Requires explicit Hydrogens)
-            mol = Chem.AddHs(mol, addCoords=True)
-            prep = MoleculePreparation()
-            # Meeko API changed in v0.5+: prepare() now returns a list
-            mol_prep_result = prep.prepare(mol)
-            if isinstance(mol_prep_result, list):
-                # New API (meeko >= 0.5): result is list of MoleculePreparation
-                if not mol_prep_result:
-                    return 0.0
-                ligand_pdbqt = mol_prep_result[0].write_pdbqt_string()
-            else:
-                # Old API (meeko < 0.5): result is None, call write on prep
-                ligand_pdbqt = prep.write_pdbqt_string()
+            # ── 1. Prepare ligand PDBQT ──
+            with _suppress_c_stderr():
+                mol_h = Chem.AddHs(mol, addCoords=True)
+                ligand_pdbqt = _mol_to_pdbqt_string(mol_h)
 
-            # 2. Prepare Receptor PDBQT
+            # ── 2. Prepare receptor PDBQT ──
             pocket_path_obj = Path(pocket_path)
             pocket_pdbqt = pocket_path_obj.with_suffix(".pdbqt")
-            
-            # If pocket_pos_updated is provided, we MUST write a new PDBQT
+
             if pocket_pos_updated is not None or not pocket_pdbqt.exists():
                 path_to_parse = str(pocket_path)
-                
-                # Apply induced fit coordinates via safe PDB string replacement
+
+                # Optionally write a new PDB with induced-fit coordinates
                 if pocket_pos_updated is not None:
                     pos_np = pocket_pos_updated.cpu().numpy()
                     new_pdb_lines = []
@@ -248,37 +278,37 @@ class RewardOracle:
                             if line.startswith("ATOM  ") or line.startswith("HETATM"):
                                 if atom_idx < len(pos_np):
                                     p = pos_np[atom_idx]
-                                    new_line = f"{line[:30]}{p[0]:8.3f}{p[1]:8.3f}{p[2]:8.3f}{line[54:]}"
+                                    new_line = (
+                                        f"{line[:30]}{p[0]:8.3f}{p[1]:8.3f}{p[2]:8.3f}"
+                                        f"{line[54:]}"
+                                    )
                                     new_pdb_lines.append(new_line)
                                     atom_idx += 1
                                 else:
                                     new_pdb_lines.append(line)
                             else:
                                 new_pdb_lines.append(line)
-                    
-                    fd, temp_updated_pdb = tempfile.mkstemp(suffix='.pdb')
+                    fd, temp_pdb = tempfile.mkstemp(suffix='.pdb')
                     os.write(fd, "".join(new_pdb_lines).encode('utf-8'))
                     os.close(fd)
-                    path_to_parse = temp_updated_pdb
+                    path_to_parse = temp_pdb
 
-                # Convert to PDBQT on the fly using RDKit + Meeko
-                receptor_mol = Chem.MolFromPDBFile(path_to_parse, sanitize=False)
-                if pocket_pos_updated is not None:
+                # Convert PDB receptor → PDBQT via meeko
+                with _suppress_c_stderr():
+                    receptor_mol = Chem.MolFromPDBFile(path_to_parse, sanitize=False)
+
+                if pocket_pos_updated is not None and os.path.exists(path_to_parse):
                     os.remove(path_to_parse)
 
                 if receptor_mol is None:
                     return 0.0
-                
-                prep_rec = MoleculePreparation(is_macrocycle=True) # Trick to avoid rotating bonds
-                rec_prep_result = prep_rec.prepare(receptor_mol)
-                if isinstance(rec_prep_result, list):
-                    if not rec_prep_result:
-                        return 0.0
-                    rec_string = rec_prep_result[0].write_pdbqt_string()
-                else:
-                    rec_string = prep_rec.write_pdbqt_string()
-                
-                # We need a temp file for the receptor because Vina requires a file path
+
+                try:
+                    with _suppress_c_stderr():
+                        rec_string = _mol_to_pdbqt_string(receptor_mol)
+                except Exception:
+                    return 0.0
+
                 fd, temp_rec_path = tempfile.mkstemp(suffix='.pdbqt')
                 os.write(fd, rec_string.encode('utf-8'))
                 os.close(fd)
@@ -288,48 +318,39 @@ class RewardOracle:
                 rec_path_to_use = str(pocket_pdbqt)
                 temp_rec_created = False
 
-            # 3. Calculate Center if not provided
+            # ── 3. Calculate box center ──
             if center is None:
-                # Average coordinate of the pocket
+                coords = []
                 with open(pocket_path, "r") as f:
-                    coords = []
                     for line in f:
-                        if line.startswith("ATOM  ") or line.startswith("HETATM"):
+                        if line.startswith(("ATOM  ", "HETATM")):
                             try:
-                                x = float(line[30:38])
-                                y = float(line[38:46])
-                                z = float(line[46:54])
-                                coords.append([x, y, z])
+                                coords.append([
+                                    float(line[30:38]),
+                                    float(line[38:46]),
+                                    float(line[46:54]),
+                                ])
                             except ValueError:
                                 pass
-                if coords:
-                    center = [sum(c)/len(c) for c in zip(*coords)]
-                else:
-                    center = [0.0, 0.0, 0.0]
+                center = [sum(c) / len(c) for c in zip(*coords)] if coords else [0.0, 0.0, 0.0]
 
-            # 4. Run Vina
+            # ── 4. Run Vina ──
             v = Vina(sf_name='vina', verbosity=0)
             v.set_receptor(rec_path_to_use)
             v.set_ligand_from_string(ligand_pdbqt)
             v.compute_vina_maps(center=center, box_size=box_size)
-            
-            # Local optimization
             energy = v.optimize()[0]
 
-            # Cleanup temp file if created
             if temp_rec_created and os.path.exists(rec_path_to_use):
                 os.remove(rec_path_to_use)
 
-            # 5. Normalise Score
-            # Vina scores are negative (e.g. -11.0 kcal/mol).
-            # We want r_vina ∈ [0, 1]. A good score is ≤ -10, a bad score is ≥ -6.
-            # r_vina = (abs(energy) - 6) / 7.0 
-            # E.g.: -13.0 -> 1.0, -6.0 -> 0.0
+            # ── 5. Normalise: r_vina ∈ [0, 1] ──
+            # -13 kcal/mol → 1.0,  -6 kcal/mol → 0.0
             r_vina = (abs(energy) - 6.0) / 7.0
             return max(0.0, min(1.0, r_vina))
 
         except Exception as e:
-            logger.warning(f"Vina scoring failed: {e}")
+            logger.debug(f"Vina scoring skipped (using proxy fallback): {e}")
             return 0.0
 
     def compute_proxy_reward(self, pK_pred: torch.Tensor) -> float:
