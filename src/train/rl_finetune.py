@@ -244,7 +244,7 @@ def rl_finetune(
                         h_P=h_P,
                     )
 
-                    # Approximate log p: ||v_θ||² proxy
+                    # Approximate log p: ||v_coord||² proxy for coordinate policy
                     # (Full change-of-variables trace is expensive;
                     #  using velocity norm as proxy for policy gradient)
                     vel = out["vel_coord"]
@@ -253,6 +253,16 @@ def rl_finetune(
                     z_coord = z_coord + vel * dt
                     z_type = z_type + out["vel_type"] * dt
                     z_coord = z_coord - z_coord.mean(0, keepdim=True)
+
+                # ── Add atom type log probability to REINFORCE ──
+                # This gives vel_type_head a direct gradient signal.
+                # Without this, RL can only improve coordinates, not atom types.
+                sampled_types = gen["atom_types"].to(device)  # actions from no-grad sampling
+                type_logits_grad = z_type / 1.2              # match sampling temperature
+                atom_type_log_prob = F.log_softmax(type_logits_grad, dim=-1)
+                log_prob = log_prob + 0.1 * atom_type_log_prob[
+                    torch.arange(N_L, device=device), sampled_types
+                ].sum()
 
                 # ── Entropy reward: r_entropy = -H(softmax(v_type)) ──
                 # Lower entropy = more confident atom types = better
@@ -290,7 +300,10 @@ def rl_finetune(
                     h_P=h_P,
                 )
 
-                kl_loss = F.mse_loss(cur_out["vel_coord"], ref_out["vel_coord"])
+                kl_coord = F.mse_loss(cur_out["vel_coord"], ref_out["vel_coord"])
+                kl_type  = F.mse_loss(cur_out["vel_type"],  ref_out["vel_type"])
+                kl_loss  = kl_coord + 0.5 * kl_type  # type KL prevents atom type drift
+
 
                 # ── DDPO loss: -log_p * R + β * KL ──
                 rl_loss = -log_prob * r + beta * kl_loss
