@@ -162,6 +162,14 @@ def evaluate_generation(
     logger.info(f"Generating molecules for {len(pocket_indices)} test pockets "
                 f"({num_mols_per_pocket} mols each)...")
 
+    import numpy as np, os
+    _marginal = None
+    if os.path.exists("marginal_prior.npy"):
+        _marginal = torch.tensor(np.load("marginal_prior.npy"), dtype=torch.float32).to(device)
+    else:
+        _marginal = torch.tensor([0.5940, 0.1650, 0.1250, 0.0480, 0.0310, 0.0370],
+                                  dtype=torch.float32).to(device)
+
     for pi, idx in enumerate(pocket_indices):
         sample = test_dataset[idx]
         if sample is None:
@@ -177,6 +185,8 @@ def evaluate_generation(
             result = model.sample(
                 pocket_pos=pocket_pos,
                 pocket_feat=pocket_feat,
+                temperature=0.8,       # SOTA v2: sharp evaluation sampling
+                marginal=_marginal,    # SOTA v2: marginal prior initialisation
             )
 
             gen_time = time.time() - t_start

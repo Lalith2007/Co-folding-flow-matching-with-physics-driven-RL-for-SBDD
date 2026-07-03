@@ -68,8 +68,9 @@ class RewardOracle:
     min_carbon_ratio : minimum fraction of atoms that must be carbon (≥0.40)
     max_nitrogen_ratio : maximum fraction of atoms that can be nitrogen (≤0.35)
     max_nn_bonds : maximum number of N-N single bonds allowed (≤2)
-    max_sa_score : maximum synthesizability score before penalty (≤6.0)
-    max_ring_nitrogen : maximum nitrogen atoms allowed in a single ring (≤2)
+    max_sa_score : maximum synthesizability score before penalty (<=5.0 SOTA v2)
+    max_ring_nitrogen : maximum nitrogen atoms allowed in a single ring (<=2)
+    min_mol_weight : minimum molecular weight in Da; below this = zero reward (>=200)
     """
 
     def __init__(
@@ -84,8 +85,9 @@ class RewardOracle:
         min_carbon_ratio: float = 0.40,
         max_nitrogen_ratio: float = 0.35,
         max_nn_bonds: int = 2,
-        max_sa_score: float = 6.0,
+        max_sa_score: float = 5.0,         # SOTA v2: tightened from 6.0
         max_ring_nitrogen: int = 2,
+        min_mol_weight: float = 200.0,      # SOTA v2: reject too-small molecules
     ):
         self.w_vina = w_vina
         self.w_qed = w_qed
@@ -99,6 +101,7 @@ class RewardOracle:
         self.max_nn_bonds = max_nn_bonds
         self.max_sa_score = max_sa_score
         self.max_ring_nitrogen = max_ring_nitrogen
+        self.min_mol_weight = min_mol_weight
         self.max_carbon_ratio = 0.85   # >85% carbon = carbon collapse penalty
         self.min_heteroatoms = 1       # must have ≥1 N or O atom
 
@@ -499,7 +502,13 @@ class RewardOracle:
         except Exception:
             return False, -0.5, "failed RDKit SanitizeMol"
 
-        # Gate 2: Carbon ratio
+        # Gate 0: Molecular weight (SOTA v2) — reject too-small molecules
+        from rdkit.Chem.Descriptors import MolWt
+        mw = MolWt(mol)
+        if mw < self.min_mol_weight:
+            return False, -0.3, f"MW too small ({mw:.0f} < {self.min_mol_weight:.0f} Da)"
+
+        # Gate 1 (was Gate 2): Carbon ratio
         carbon_score = self.compute_element_diversity(mol)
         if carbon_score < 0.5:
             return False, -0.3, f"carbon ratio too low ({carbon_score:.2f})"

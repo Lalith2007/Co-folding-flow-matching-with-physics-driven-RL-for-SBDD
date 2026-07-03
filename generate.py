@@ -485,19 +485,33 @@ def generate_for_pocket(
                 f"(sampling {oversample}, filtering top-{num_mols})")
 
     # Initialize the pharma-grade reward oracle for safety gate checks
+    # SOTA v2: tighten SA gate to 5.0 and add min_mol_weight=200 (matches training config)
     pharma_oracle = RewardOracle(
         min_carbon_ratio=0.40,
         max_nitrogen_ratio=0.35,
         max_nn_bonds=2,
-        max_sa_score=6.0,
+        max_sa_score=5.0,           # SOTA v2: tightened from 6.0
         max_ring_nitrogen=2,
+        min_mol_weight=200.0,       # SOTA v2: reject too-small molecules
     )
+
+    # Load marginal prior (SOTA v2: start sampling from data distribution, not uniform)
+    import numpy as np, os
+    marginal = None
+    if os.path.exists("marginal_prior.npy"):
+        marginal = torch.tensor(np.load("marginal_prior.npy"), dtype=torch.float32).to(device)
+    else:
+        # Default marginal from CrossDocked2020 stats
+        marginal = torch.tensor([0.5940, 0.1650, 0.1250, 0.0480, 0.0310, 0.0370],
+                                dtype=torch.float32).to(device)
 
     for i in range(oversample):
         sample = model.sample(
             pocket_pos=pocket_data["pocket_pos"],
             pocket_feat=pocket_data["pocket_feat"],
             num_atoms=num_atoms,
+            temperature=0.8,     # SOTA v2: sharp evaluation sampling
+            marginal=marginal,   # SOTA v2: marginal prior initialisation
         )
 
         pos_np = sample["pos"].cpu().numpy()

@@ -69,7 +69,7 @@ def build_model(cfg: dict, device: str) -> "FlowMatching":
     )
 
     egnn = SE3EGNN(
-        ligand_in_dim=4,  # 4 non-element features: aromatic, degree, charge, ring
+        ligand_in_dim=4,
         pocket_dim=cfg["egnn"]["hidden_dim"],
         hidden_dim=cfg["egnn"]["hidden_dim"],
         num_layers=cfg["egnn"]["num_layers"],
@@ -195,6 +195,17 @@ def run_phase_a(
         opt_state = ckpt.get("optimizer_state_dict", None)
 
     pt_cfg = cfg["pretrain"]
+    sc_cfg = cfg.get("self_conditioning", {})
+
+    # Load marginal prior: try npy file first, fall back to config values
+    import numpy as np, os
+    marginal = None
+    if os.path.exists("marginal_prior.npy"):
+        marginal = torch.tensor(np.load("marginal_prior.npy"), dtype=torch.float32).to(device)
+        logger.info(f"Loaded marginal prior from marginal_prior.npy: {marginal.tolist()}")
+    elif "marginal_prior" in cfg.get("ligand", {}):
+        marginal = torch.tensor(cfg["ligand"]["marginal_prior"], dtype=torch.float32).to(device)
+        logger.info(f"Using marginal prior from config: {marginal.tolist()}")
 
     model = pretrain(
         model=model,
@@ -207,7 +218,7 @@ def run_phase_a(
         betas=tuple(pt_cfg["betas"]),
         grad_clip=pt_cfg["grad_clip"],
         affinity_lambda=pt_cfg["affinity_loss_lambda"],
-        type_loss_weight=pt_cfg.get("type_loss_weight", 5.0),
+        type_loss_weight=pt_cfg.get("type_loss_weight", 1.0),
         eval_every=pt_cfg["eval_every"],
         save_every=pt_cfg["save_every"],
         save_dir="checkpoints",
@@ -216,6 +227,9 @@ def run_phase_a(
         reward_scale=cfg["affinity"]["reward_scale"],
         start_step=start_step,
         optimizer_state=opt_state,
+        marginal=marginal,
+        sc_prob=sc_cfg.get("prob", 0.5),
+        warmup_steps=pt_cfg.get("warmup_steps", 10000),
     )
 
     logger.info("Phase A complete. Checkpoint: checkpoints/pretrain_final.pt")
@@ -243,6 +257,15 @@ def run_phase_b(model, cfg, train_pairs, device, checkpoint=None):
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
 
     rl_cfg = cfg["rl"]
+    reward_cfg = cfg.get("reward", {})
+
+    # Load marginal prior (same as Phase A)
+    import numpy as np, os
+    marginal = None
+    if os.path.exists("marginal_prior.npy"):
+        marginal = torch.tensor(np.load("marginal_prior.npy"), dtype=torch.float32).to(device)
+    elif "marginal_prior" in cfg.get("ligand", {}):
+        marginal = torch.tensor(cfg["ligand"]["marginal_prior"], dtype=torch.float32).to(device)
 
     model = rl_finetune(
         model=model,
@@ -256,10 +279,12 @@ def run_phase_b(model, cfg, train_pairs, device, checkpoint=None):
         top_k=rl_cfg["top_k"],
         kl_beta_start=rl_cfg["kl_beta_start"],
         kl_beta_end=rl_cfg["kl_beta_end"],
+        vina_every_n=reward_cfg.get("vina_every_n", 2),
         save_dir="checkpoints",
         device=device,
         reward_offset=cfg["affinity"]["reward_offset"],
         reward_scale=cfg["affinity"]["reward_scale"],
+        marginal=marginal,
     )
 
     logger.info("Phase B complete. Checkpoint: checkpoints/rl_final.pt")

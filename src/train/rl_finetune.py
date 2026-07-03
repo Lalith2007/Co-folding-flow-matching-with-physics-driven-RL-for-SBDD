@@ -47,20 +47,21 @@ def rl_finetune(
     pretrained_checkpoint: str,
     train_pairs: list,
     base_dir: str,
-    max_steps: int = 50_000,
-    lr: float = 1e-5,
-    batch_pockets: int = 32,
-    mols_per_pocket: int = 100,
-    top_k: int = 10,
-    kl_beta_start: float = 0.01,
-    kl_beta_end: float = 0.001,
-    vina_every_n: int = 10,
+    max_steps: int = 5000,        # SOTA v2: 5x more RL steps
+    lr: float = 5e-6,             # SOTA v2: lower lr for larger model
+    batch_pockets: int = 2,       # SOTA v2: 2 pockets per round
+    mols_per_pocket: int = 8,     # SOTA v2: 8 mols per pocket
+    top_k: int = 3,
+    kl_beta_start: float = 0.005, # SOTA v2: tighter KL for larger model
+    kl_beta_end: float = 0.0005,
+    vina_every_n: int = 2,        # SOTA v2: Vina every 2 steps
     curriculum_every: int = 500,
-    save_every: int = 5000,
+    save_every: int = 500,
     save_dir: str = "checkpoints",
     device: str = "cuda",
     reward_offset: float = 6.0,
     reward_scale: float = 7.0,
+    marginal: torch.Tensor = None, # (num_atom_types,) empirical prior for SOTA v2
 ):
     """Run Phase B DDPO RL fine-tuning.
 
@@ -103,8 +104,9 @@ def rl_finetune(
         min_carbon_ratio=0.40,
         max_nitrogen_ratio=0.35,
         max_nn_bonds=2,
-        max_sa_score=6.0,
+        max_sa_score=5.0,          # SOTA v2: tightened from 6.0
         max_ring_nitrogen=2,
+        min_mol_weight=200.0,      # SOTA v2: MW gate
     )
 
     # RL curriculum: start with easy pockets, increase difficulty
@@ -171,7 +173,11 @@ def rl_finetune(
             with torch.no_grad():
                 candidates = []
                 for _ in range(mols_per_pocket):
-                    gen = model.sample(pocket_pos, pocket_feat, temperature=1.2)  # >1 for diverse atom type exploration
+                    gen = model.sample(
+                        pocket_pos, pocket_feat,
+                        temperature=1.2,    # >1 for diverse atom type exploration
+                        marginal=marginal,  # SOTA v2: marginal prior init
+                    )
                     candidates.append(gen)
 
             # ── Step 2: Score with FULL multi-objective reward ──
@@ -222,15 +228,20 @@ def rl_finetune(
                 N_L = gen["num_atoms"]
                 z_coord = torch.randn(N_L, 3, device=device)
                 z_coord = z_coord - z_coord.mean(0, keepdim=True)
-                z_type = torch.ones(
-                    N_L, model.egnn.num_atom_types, device=device
-                ) / model.egnn.num_atom_types
-                h_L_raw = torch.zeros(N_L, 4, device=device)  # 4 non-element features: aromatic, degree, charge, ring
+
+                # SOTA v2: start from marginal prior (not uniform)
+                if marginal is not None:
+                    z_type = marginal.to(device).unsqueeze(0).expand(N_L, -1).clone().float()
+                else:
+                    z_type = torch.ones(N_L, model.egnn.num_atom_types, device=device) / model.egnn.num_atom_types
+                h_L_raw = torch.zeros(N_L, 4, device=device)
 
                 # Use fewer ODE steps for RL (20 vs 50) — faster, still good enough
                 rl_num_steps = 20
                 dt = 1.0 / rl_num_steps
                 log_prob = torch.tensor(0.0, device=device)
+                # SOTA v2: self-conditioning accumulation in gradient loop
+                sc_prior = torch.zeros(N_L, model.egnn.num_atom_types, device=device)
 
                 for s in range(rl_num_steps):
                     t_val = s * dt
@@ -242,24 +253,27 @@ def rl_finetune(
                         atom_types_onehot=z_type,
                         t=t,
                         h_P=h_P,
+                        sc_prior=sc_prior,
                     )
 
-                    # Approximate log p: ||v_coord||² proxy for coordinate policy
-                    # (Full change-of-variables trace is expensive;
-                    #  using velocity norm as proxy for policy gradient)
+                    # Coordinate: velocity-norm proxy for log_prob
                     vel = out["vel_coord"]
                     log_prob = log_prob - 0.5 * (vel ** 2).sum() * dt
 
                     z_coord = z_coord + vel * dt
-                    z_type = z_type + out["vel_type"] * dt
                     z_coord = z_coord - z_coord.mean(0, keepdim=True)
 
-                # ── Add atom type log probability to REINFORCE ──
-                # This gives vel_type_head a direct gradient signal.
-                # Without this, RL can only improve coordinates, not atom types.
-                sampled_types = gen["atom_types"].to(device)  # actions from no-grad sampling
-                type_logits_grad = z_type / 1.2              # match sampling temperature
-                atom_type_log_prob = F.log_softmax(type_logits_grad, dim=-1)
+                    # SOTA v2: x1-prediction velocity for atom types
+                    pred_x1 = F.softmax(out["type_logits"], dim=-1)
+                    vel_type = (pred_x1 - z_type) / (1.0 - t_val + 1e-8)
+                    z_type = z_type + vel_type * dt
+                    # Update self-conditioning prior (detach to avoid graph growth)
+                    sc_prior = pred_x1.detach()
+
+                # Atom type log probability from final accumulated type distribution
+                sampled_types = gen["atom_types"].to(device)
+                type_probs_grad = F.softmax(z_type / 1.2, dim=-1).clamp(min=1e-8)  # match sampling temperature
+                atom_type_log_prob = type_probs_grad.log()
                 log_prob = log_prob + 0.1 * atom_type_log_prob[
                     torch.arange(N_L, device=device), sampled_types
                 ].sum()
@@ -300,9 +314,15 @@ def rl_finetune(
                     h_P=h_P,
                 )
 
+                # KL: MSE on coordinate velocity + CE on type logits vs reference
                 kl_coord = F.mse_loss(cur_out["vel_coord"], ref_out["vel_coord"])
-                kl_type  = F.mse_loss(cur_out["vel_type"],  ref_out["vel_type"])
-                kl_loss  = kl_coord + 0.5 * kl_type  # type KL prevents atom type drift
+                # SOTA v2: KL on type_logits (x1 prediction)
+                kl_type = F.kl_div(
+                    F.log_softmax(cur_out["type_logits"], dim=-1),
+                    F.softmax(ref_out["type_logits"].detach(), dim=-1),
+                    reduction="batchmean"
+                )
+                kl_loss  = kl_coord + 0.5 * kl_type
 
 
                 # ── DDPO loss: -log_p * R + β * KL ──

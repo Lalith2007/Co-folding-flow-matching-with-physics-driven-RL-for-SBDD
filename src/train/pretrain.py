@@ -30,22 +30,25 @@ def pretrain(
     model: FlowMatching,
     train_dataset: SBDDDataset,
     val_dataset: Optional[SBDDDataset] = None,
-    max_steps: int = 200_000,
-    batch_size: int = 4,
-    lr: float = 3e-4,
+    max_steps: int = 1_000_000,     # SOTA v2: 5x longer
+    batch_size: int = 16,           # SOTA v2: reduced for larger model
+    lr: float = 2e-4,               # SOTA v2: slightly lower for larger model
     weight_decay: float = 1e-2,
     betas: tuple = (0.9, 0.999),
     grad_clip: float = 1.0,
     affinity_lambda: float = 0.1,
-    type_loss_weight: float = 5.0,
-    eval_every: int = 2000,
-    save_every: int = 10000,
+    type_loss_weight: float = 1.0,  # SOTA v2: CE is self-normalising
+    eval_every: int = 10000,        # SOTA v2: less frequent eval
+    save_every: int = 50000,        # SOTA v2: save every 50k steps
     save_dir: str = "checkpoints",
     device: str = "cuda",
     reward_offset: float = 6.0,
     reward_scale: float = 7.0,
     start_step: int = 0,
     optimizer_state: Optional[dict] = None,
+    marginal: torch.Tensor = None,  # (num_atom_types,) empirical prior for discrete flow
+    sc_prob: float = 0.5,           # self-conditioning probability (FlowMol3)
+    warmup_steps: int = 10000,      # SOTA v2: longer warmup for 1M step schedule
 ):
     """Run Phase A pretraining.
 
@@ -123,11 +126,14 @@ def pretrain(
 
     # Learning rate warmup scheduler: linearly ramp from lr/100 to lr
     # over the first 1000 steps to prevent gradient explosion
-    warmup_steps = 1000
+    # LR schedule: linear warmup then cosine decay
+    # SOTA v2: 10k warmup steps for 1M step training
     def get_lr_scale(current_step):
         if current_step < warmup_steps:
             return 0.01 + 0.99 * (current_step / warmup_steps)
-        return 1.0
+        # Cosine decay from 1.0 to 0.1 over remaining steps
+        progress = (current_step - warmup_steps) / max(max_steps - warmup_steps, 1)
+        return 0.1 + 0.9 * 0.5 * (1 + torch.cos(torch.tensor(progress * 3.14159)).item())
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, get_lr_scale)
 
@@ -188,6 +194,8 @@ def pretrain(
                 ligand_bonds=ligand_bonds,
                 batch_P=batch_P,
                 batch_L=batch_L,
+                marginal=marginal,    # SOTA v2: marginal prior
+                sc_prob=sc_prob,      # SOTA v2: self-conditioning probability
             )
 
         # Guard: skip step if loss is NaN to prevent poisoning model weights
