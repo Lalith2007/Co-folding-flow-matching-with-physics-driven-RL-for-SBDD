@@ -171,7 +171,7 @@ def rl_finetune(
             with torch.no_grad():
                 candidates = []
                 for _ in range(mols_per_pocket):
-                    gen = model.sample(pocket_pos, pocket_feat)
+                    gen = model.sample(pocket_pos, pocket_feat, temperature=1.2)  # >1 for diverse atom type exploration
                     candidates.append(gen)
 
             # ── Step 2: Score with FULL multi-objective reward ──

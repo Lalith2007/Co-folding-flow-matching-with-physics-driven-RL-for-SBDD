@@ -322,6 +322,7 @@ class FlowMatching(nn.Module):
         pocket_feat: torch.Tensor,    # (N_P, F_P)
         num_atoms: int = None,        # override number of ligand atoms
         ligand_feat_dim: int = 4,     # non-element ligand features (aromatic, degree, charge, ring)
+        temperature: float = 0.8,     # atom type sampling temperature (< 1 = sharper, > 1 = more diverse)
     ) -> dict:
         """Generate a molecule via 50-step Euler integration.
 
@@ -375,8 +376,17 @@ class FlowMatching(nn.Module):
             # Re-centre CoM of ligand
             z_coord = z_coord - z_coord.mean(dim=0, keepdim=True)
 
-        # Decode atom types via argmax (model should now produce meaningful predictions)
-        atom_types = z_type.argmax(dim=-1)
+        # ── Decode atom types via temperature sampling (NOT argmax) ──
+        #
+        # argmax on a near-uniform distribution always returns index 0 (Carbon),
+        # causing the "all-carbon collapse" even when vel_type has weak but real signal.
+        # Temperature sampling:
+        #   - temperature < 1.0  → sharper (more confident in model's top prediction)
+        #   - temperature = 1.0  → sample proportional to z_type directly
+        #   - temperature > 1.0  → flatter (more exploration, useful during RL)
+        type_logits = z_type / temperature
+        type_probs = F.softmax(type_logits, dim=-1)
+        atom_types = torch.multinomial(type_probs, num_samples=1).squeeze(-1)
 
         # Get final affinity prediction
         pK_pred = out["pK_pred"]
@@ -384,7 +394,7 @@ class FlowMatching(nn.Module):
         return {
             "pos": z_coord,
             "atom_types": atom_types,
-            "type_probs": F.softmax(z_type, dim=-1),
+            "type_probs": type_probs,
             "pK_pred": pK_pred,
             "num_atoms": N_L,
             "pocket_pos_updated": pocket_pos.detach(),
