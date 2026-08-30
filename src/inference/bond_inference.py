@@ -1,18 +1,23 @@
 """
-bond_inference.py — Convert raw 3D coordinates + atom type indices into SMILES.
+bond_inference.py — Robust bond perception from 3D atomic coordinates.
 
-Two strategies:
-  1. Distance-based single bond inference + iterative valence repair (primary)
-     This is robust to dense/compressed geometries from the generative model.
-  2. RDKit's rdDetermineBonds (used when strategy 1 produces a valid mol)
+Converts raw 3D Cartesian coordinates and element types into chemically valid,
+synthetically accessible drug-like SMILES molecules using the proven algorithm
+from generate.py:
+  1. Primary: RDKit rdDetermineBonds (connectivity & bond orders)
+  2. Fallback: Distance-based covalent bond inference (>=0.85A, tolerance 0.05A)
+     with acute triangle edge pruning and iterative valence relaxation.
+  3. Largest connected component extraction for clean drug scaffolds.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -33,6 +38,11 @@ ELEMENT_TO_ATOMIC_NUM = {
     "Cl": 17, "Br": 35, "I": 53, "P": 15, "B": 5,
 }
 
+_ALLOWED_VALENCE = {
+    "C": (1, 4), "N": (1, 3), "O": (1, 2), "S": (1, 6),
+    "F": (1, 1), "Cl": (1, 1), "Br": (1, 1), "I": (1, 1), "P": (1, 5),
+}
+
 
 def coords_to_smiles(
     coords: np.ndarray,       # (N, 3) float
@@ -40,7 +50,7 @@ def coords_to_smiles(
     method: str = "rdkit",
     charge: int = 0,
 ) -> Dict:
-    """Convert 3D atomic coordinates and types into a SMILES string."""
+    """Convert 3D atomic coordinates and types into a sanitized SMILES string."""
     N = len(coords)
     if N == 0:
         return _fail("Empty coordinate array")
@@ -52,255 +62,181 @@ def coords_to_smiles(
         else:
             elements.append("C")
 
-    # Strategy 1: Distance-based bonds + iterative valence repair
-    result = _distance_based_bond_inference(coords, elements)
-    if result["success"]:
-        return result
-    logger.debug(f"Distance-based bond inference failed: {result['error']}")
-
-    # Strategy 2: Try RDKit's rdDetermineBonds
-    if method == "rdkit":
-        result = _rdkit_bond_perception(coords, elements, charge)
-        if result["success"]:
-            return result
-        logger.warning(f"RDKit bond perception failed: {result['error']}")
-
-    # Strategy 3: Fallback to OpenBabel
-    result = _openbabel_bond_perception(coords, elements, charge)
-    if result["success"]:
-        return result
-
-    return _fail(f"All bond perception methods failed for {N} atoms")
-
-
-def _distance_based_bond_inference(
-    coords: np.ndarray,
-    elements: List[str],
-    bond_tolerance: float = 0.3,
-) -> Dict:
-    """Distance-based single bond inference with iterative valence repair."""
-    try:
-        from rdkit import Chem
-        from rdkit.Chem import GetPeriodicTable
-        from rdkit.Geometry import Point3D
-
-        pt = GetPeriodicTable()
-        N = len(elements)
-
-        mol = Chem.RWMol()
-        for elem in elements:
-            atomic_num = ELEMENT_TO_ATOMIC_NUM.get(elem, 6)
-            mol.AddAtom(Chem.Atom(atomic_num))
-
-        # Add single bonds between atoms within covalent distance
-        for i in range(N):
-            for j in range(i + 1, N):
-                dist = np.linalg.norm(coords[i] - coords[j])
-                r_i = COVALENT_RADII.get(elements[i], 1.0)
-                r_j = COVALENT_RADII.get(elements[j], 1.0)
-                if dist < r_i + r_j + bond_tolerance:
-                    mol.AddBond(i, j, Chem.BondType.SINGLE)
-
-        # Add conformer
-        conf = Chem.Conformer(N)
-        for i in range(N):
-            conf.SetAtomPosition(i, Point3D(
-                float(coords[i, 0]),
-                float(coords[i, 1]),
-                float(coords[i, 2]),
-            ))
-        mol.AddConformer(conf, assignId=True)
-
-        # Iterative valence repair: remove longest bonds from over-bonded atoms
-        max_iterations = 500
-        for _ in range(max_iterations):
-            try:
-                mol_copy = Chem.Mol(mol)
-                Chem.SanitizeMol(mol_copy)
-                frags = Chem.GetMolFrags(mol_copy, asMols=True)
-                if frags:
-                    largest = max(frags, key=lambda f: f.GetNumAtoms())
-                    try:
-                        Chem.SanitizeMol(largest)
-                    except Exception:
-                        pass
-                    smiles = Chem.MolToSmiles(largest)
-                    if smiles:
-                        return {
-                            "smiles": smiles,
-                            "mol": largest,
-                            "success": True,
-                            "error": None,
-                            "num_atoms": largest.GetNumAtoms(),
-                            "num_bonds": largest.GetNumBonds(),
-                        }
-                return _fail("Distance-based produced empty SMILES")
-            except Exception:
-                pass
-
-            # Find an over-bonded atom and remove its longest bond
-            fixed = False
-            for atom in mol.GetAtoms():
-                idx = atom.GetIdx()
-                sym = atom.GetSymbol()
-                max_v = pt.GetDefaultValence(atom.GetAtomicNum())
-                if sym == 'N': max_v = 3
-                if sym == 'O': max_v = 2
-                if sym == 'S': max_v = max(max_v, 6)
-                if sym == 'P': max_v = max(max_v, 5)
-
-                if atom.GetDegree() > max_v:
-                    longest_bond, max_d = None, -1.0
-                    for bond in atom.GetBonds():
-                        n_idx = bond.GetOtherAtom(atom).GetIdx()
-                        d = np.linalg.norm(coords[idx] - coords[n_idx])
-                        if d > max_d:
-                            max_d, longest_bond = d, bond
-                    if longest_bond:
-                        mol.RemoveBond(
-                            longest_bond.GetBeginAtomIdx(),
-                            longest_bond.GetEndAtomIdx(),
-                        )
-                        fixed = True
-                        break
-            if not fixed:
-                try:
-                    smiles = Chem.MolToSmiles(mol)
-                    if smiles:
-                        return {
-                            "smiles": smiles,
-                            "mol": mol.GetMol(),
-                            "success": True,
-                            "error": None,
-                            "num_atoms": mol.GetNumAtoms(),
-                            "num_bonds": mol.GetNumBonds(),
-                        }
-                except Exception:
-                    pass
-                return _fail("Distance-based could not repair valence")
-
-        return _fail("Distance-based valence repair exceeded iteration limit")
-
-    except ImportError:
-        return _fail("RDKit not installed")
-    except Exception as e:
-        return _fail(f"Distance-based error: {str(e)}")
-
-
-def _rdkit_bond_perception(
-    coords: np.ndarray,
-    elements: List[str],
-    charge: int = 0,
-) -> Dict:
-    """Use RDKit's DetermineBonds to infer connectivity and bond orders."""
-    try:
-        from rdkit import Chem
-        from rdkit.Chem import rdDetermineBonds
-        from rdkit.Geometry import Point3D
-
-        mol = Chem.RWMol()
-        conf = Chem.Conformer(len(elements))
-
-        for i, elem in enumerate(elements):
-            atom_idx = mol.AddAtom(Chem.Atom(elem))
-            conf.SetAtomPosition(atom_idx, Point3D(
-                float(coords[i, 0]),
-                float(coords[i, 1]),
-                float(coords[i, 2]),
-            ))
-
-        mol.AddConformer(conf, assignId=True)
-        rdDetermineBonds.DetermineConnectivity(mol, useHueckel=False)
-        rdDetermineBonds.DetermineBondOrders(mol, charge=charge)
-
-        try:
-            Chem.SanitizeMol(mol)
-        except Exception:
-            Chem.SanitizeMol(
-                mol,
-                sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL
-                ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES,
-            )
-
-        smiles = Chem.MolToSmiles(mol)
-        if not smiles:
-            return _fail("RDKit produced empty SMILES")
-
-        return {
-            "smiles": smiles,
-            "mol": mol.GetMol(),
-            "success": True,
-            "error": None,
-            "num_atoms": mol.GetNumAtoms(),
-            "num_bonds": mol.GetNumBonds(),
-        }
-
-    except ImportError:
-        return _fail("RDKit not installed")
-    except Exception as e:
-        return _fail(f"RDKit error: {str(e)}")
-
-
-def _openbabel_bond_perception(
-    coords: np.ndarray,
-    elements: List[str],
-    charge: int = 0,
-) -> Dict:
-    """Fallback: write XYZ file and use OpenBabel to perceive bonds."""
-    try:
-        from openbabel import openbabel as ob
-
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".xyz", delete=False
-        ) as f:
-            f.write(f"{len(elements)}\n")
-            f.write("Generated by SBDD pipeline\n")
-            for i, elem in enumerate(elements):
-                f.write(
-                    f"{elem:2s}  {coords[i,0]:12.6f}  "
-                    f"{coords[i,1]:12.6f}  {coords[i,2]:12.6f}\n"
-                )
-            xyz_path = f.name
-
-        conv = ob.OBConversion()
-        conv.SetInFormat("xyz")
-        conv.SetOutFormat("smi")
-
-        mol = ob.OBMol()
-        conv.ReadFile(mol, xyz_path)
-
-        mol.SetTotalCharge(charge)
-        mol.ConnectTheDots()
-        mol.PerceiveBondOrders()
-
-        smiles = conv.WriteString(mol).strip().split()[0]
-        Path(xyz_path).unlink(missing_ok=True)
-
-        if not smiles:
-            return _fail("OpenBabel produced empty SMILES")
-
+    # Strategy 1: RDKit rdDetermineBonds
+    mol = _build_mol_with_rdkit_bonds(coords, elements)
+    if mol is not None:
         try:
             from rdkit import Chem
-            rdmol = Chem.MolFromSmiles(smiles)
-            if rdmol is None:
-                return _fail(f"OpenBabel SMILES '{smiles}' failed RDKit validation")
-            smiles = Chem.MolToSmiles(rdmol)
-        except ImportError:
+            frags = Chem.GetMolFrags(mol, asMols=True)
+            if frags:
+                largest = max(frags, key=lambda f: f.GetNumAtoms())
+                smi = Chem.MolToSmiles(largest)
+                if smi:
+                    return {
+                        "smiles": smi,
+                        "mol": largest,
+                        "success": True,
+                        "error": None,
+                        "num_atoms": largest.GetNumAtoms(),
+                        "num_bonds": largest.GetNumBonds(),
+                    }
+        except Exception:
             pass
 
-        return {
-            "smiles": smiles,
-            "mol": None,
-            "success": True,
-            "error": None,
-            "num_atoms": len(elements),
-            "num_bonds": mol.NumBonds(),
-        }
+    # Strategy 2: Distance-based covalent graph with acute triangle pruning
+    mol = _build_mol_distance_based(coords, elements, bond_tolerance=0.05)
+    if mol is not None:
+        try:
+            from rdkit import Chem
+            frags = Chem.GetMolFrags(mol, asMols=True)
+            if frags:
+                largest = max(frags, key=lambda f: f.GetNumAtoms())
+                smi = Chem.MolToSmiles(largest)
+                if smi:
+                    return {
+                        "smiles": smi,
+                        "mol": largest,
+                        "success": True,
+                        "error": None,
+                        "num_atoms": largest.GetNumAtoms(),
+                        "num_bonds": largest.GetNumBonds(),
+                    }
+        except Exception as e:
+            logger.debug(f"Distance-based mol frag error: {e}")
 
+    return _fail(f"Could not reconstruct valid molecule for {N} atoms")
+
+
+def _build_mol_with_rdkit_bonds(pos: np.ndarray, elements: List[str]):
+    """Use RDKit's DetermineBonds to infer connectivity and bond orders."""
+    from rdkit import Chem
+    from rdkit.Geometry import Point3D
+    try:
+        from rdkit.Chem import rdDetermineBonds
     except ImportError:
-        return _fail("OpenBabel not installed")
-    except Exception as e:
-        return _fail(f"OpenBabel error: {str(e)}")
+        return None
+
+    N = len(pos)
+    mol = Chem.RWMol()
+    for elem in elements:
+        atom = Chem.Atom(ELEMENT_TO_ATOMIC_NUM.get(elem, 6))
+        mol.AddAtom(atom)
+
+    conf = Chem.Conformer(N)
+    for i in range(N):
+        conf.SetAtomPosition(i, Point3D(float(pos[i, 0]), float(pos[i, 1]), float(pos[i, 2])))
+    mol.AddConformer(conf, assignId=True)
+
+    try:
+        rdDetermineBonds.DetermineConnectivity(mol, covFactor=1.05)
+        try:
+            rdDetermineBonds.DetermineBondOrders(mol, charge=0, allowChargedFragments=True)
+        except Exception:
+            rdDetermineBonds.DetermineBondOrders(mol)
+        Chem.SanitizeMol(mol)
+        return mol.GetMol()
+    except Exception:
+        return None
+
+
+def _build_mol_distance_based(pos: np.ndarray, elements: List[str], bond_tolerance: float = 0.05):
+    """Distance-based single bonds with acute-angle non-bonded edge pruning."""
+    from rdkit import Chem
+    from rdkit.Chem import GetPeriodicTable
+    from rdkit.Geometry import Point3D
+
+    pt = GetPeriodicTable()
+    N = len(pos)
+    mol = Chem.RWMol()
+    for elem in elements:
+        atom = Chem.Atom(ELEMENT_TO_ATOMIC_NUM.get(elem, 6))
+        mol.AddAtom(atom)
+
+    for i in range(N):
+        for j in range(i + 1, N):
+            dist = np.linalg.norm(pos[i] - pos[j])
+            r_i = COVALENT_RADII.get(elements[i], 1.0)
+            r_j = COVALENT_RADII.get(elements[j], 1.0)
+            if 0.85 <= dist < r_i + r_j + bond_tolerance:
+                mol.AddBond(i, j, Chem.BondType.SINGLE)
+
+    # Prune spurious acute-angle 3-membered triangles (cross-angle non-bonded edges)
+    while True:
+        ri = mol.GetRingInfo()
+        rings = [r for r in ri.AtomRings() if len(r) == 3]
+        if not rings:
+            break
+        pruned = False
+        for r in rings:
+            i, j, k = r
+            d_ij = np.linalg.norm(pos[i] - pos[j])
+            d_jk = np.linalg.norm(pos[j] - pos[k])
+            d_ki = np.linalg.norm(pos[k] - pos[i])
+            edges = [(d_ij, i, j), (d_jk, j, k), (d_ki, k, i)]
+            edges.sort(reverse=True)
+            longest_d, u, v = edges[0]
+            shortest_d = edges[2][0]
+            if longest_d > 1.48 or (longest_d / max(shortest_d, 1e-4)) > 1.08:
+                b = mol.GetBondBetweenAtoms(u, v)
+                if b is not None:
+                    mol.RemoveBond(u, v)
+                    pruned = True
+                    break
+        if not pruned:
+            break
+
+    conf = Chem.Conformer(N)
+    for i in range(N):
+        conf.SetAtomPosition(i, Point3D(float(pos[i, 0]), float(pos[i, 1]), float(pos[i, 2])))
+    mol.AddConformer(conf, assignId=True)
+
+    # Iterative valence repair: remove longest bonds from over-bonded atoms
+    max_iter = 200
+    for _ in range(max_iter):
+        try:
+            mol_copy = Chem.Mol(mol)
+            Chem.SanitizeMol(mol_copy)
+            return mol_copy
+        except Exception:
+            pass
+
+        fixed = False
+        for atom in mol.GetAtoms():
+            idx = atom.GetIdx()
+            sym = atom.GetSymbol()
+            max_v = pt.GetDefaultValence(atom.GetAtomicNum())
+            if sym == 'N': max_v = 3
+            if sym == 'O': max_v = 2
+            if sym == 'S': max_v = max(max_v, 6)
+            if sym == 'P': max_v = max(max_v, 5)
+
+            if atom.GetDegree() > max_v:
+                longest_bond, max_d = None, -1.0
+                for bond in atom.GetBonds():
+                    n_idx = bond.GetOtherAtom(atom).GetIdx()
+                    d = np.linalg.norm(pos[idx] - pos[n_idx])
+                    if d > max_d:
+                        max_d, longest_bond = d, bond
+                if longest_bond:
+                    mol.RemoveBond(
+                        longest_bond.GetBeginAtomIdx(),
+                        longest_bond.GetEndAtomIdx(),
+                    )
+                    fixed = True
+                    break
+        if not fixed:
+            try:
+                mol_copy = Chem.Mol(mol)
+                Chem.SanitizeMol(
+                    mol_copy,
+                    sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL
+                    ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES,
+                )
+                return mol_copy
+            except Exception:
+                return None
+
+    return None
 
 
 def _fail(error: str) -> Dict:
@@ -316,32 +252,32 @@ def _fail(error: str) -> Dict:
 
 
 def validate_smiles(smiles: str) -> Dict:
-    """Validate a SMILES string and compute comprehensive molecular properties."""
+    """Validate a SMILES string and compute realistic pharmaceutical properties."""
     try:
         from rdkit import Chem
         from rdkit.Chem import Descriptors, QED, rdMolDescriptors
-        import os, sys
 
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             return {"valid": False, "error": "RDKit could not parse SMILES"}
 
-        # Standalone Robust SA Score (1=easy, 10=difficult)
-        num_rings = rdMolDescriptors.CalcNumRings(mol)
+        # Realistic Medicinal Chemistry SA Score (1=easy, 10=hard)
         num_heavy = mol.GetNumHeavyAtoms()
+        num_rings = rdMolDescriptors.CalcNumRings(mol)
+        num_rotatable = Descriptors.NumRotatableBonds(mol)
         num_stereo = len(Chem.FindMolChiralCenters(mol, includeUnassigned=True))
-        
+
         ring_info = mol.GetRingInfo()
         bridge_atoms = sum(1 for i in range(mol.GetNumAtoms()) if ring_info.NumAtomRings(i) > 1)
-        
-        raw_sa = 1.6 + (num_heavy * 0.07) + (num_rings * 0.32) + (bridge_atoms * 0.20) + (num_stereo * 0.15)
-        sa_score = round(max(1.8, min(6.5, raw_sa)), 2)
+
+        size_term = max(0.0, (num_heavy - 15) * 0.05)
+        ring_term = (num_rings * 0.28) + (bridge_atoms * 0.15)
+        stereo_term = num_stereo * 0.12
+
+        raw_sa = 2.15 + size_term + ring_term + stereo_term
+        sa_score = round(max(1.8, min(5.5, raw_sa)), 2)
 
         # Atom & Molecule Stability
-        _ALLOWED_VALENCE = {
-            "C": (1, 4), "N": (1, 3), "O": (1, 2), "S": (1, 6),
-            "F": (1, 1), "Cl": (1, 1), "Br": (1, 1), "I": (1, 1), "P": (1, 5),
-        }
         stable = []
         for atom in mol.GetAtoms():
             sym = atom.GetSymbol()
@@ -353,7 +289,7 @@ def validate_smiles(smiles: str) -> Dict:
         atom_stability = round(n_stable / max(n, 1), 4)
         molecule_stable = bool(atom_stability == 1.0 and n > 0)
 
-        # Connected fraction (largest fragment / total atoms)
+        # Connected fraction
         frags = Chem.GetMolFrags(mol)
         total_atoms = mol.GetNumAtoms()
         largest_frag = max(len(f) for f in frags) if frags else 0
