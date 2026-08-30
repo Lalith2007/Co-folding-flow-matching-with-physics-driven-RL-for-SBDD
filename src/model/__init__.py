@@ -1,4 +1,2 @@
-from .pocket_encoder import PocketEncoder
-from .egnn import SE3EGNN
-from .flow_matching import FlowMatching
-from .reward import RewardOracle
+# Lazy imports — do not import here to avoid circular import races under torchrun.
+# Import directly: from src.model.flow_matching import FlowMatching

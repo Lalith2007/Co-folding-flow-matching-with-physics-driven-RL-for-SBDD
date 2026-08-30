@@ -160,6 +160,33 @@ async def generate_molecule(
             detail=result["error"],
         )
 
+    # Compute batch-level metrics (uniqueness, novelty, similarity) over all valid SMILES
+    all_smiles_list = [s for s in result.get("all_smiles", []) if s]
+    batch_metrics: dict = {}
+    if all_smiles_list:
+        try:
+            import sys, os
+            sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+            from generate import compute_uniqueness, compute_novelty, compute_similarity
+            batch_metrics["uniqueness"] = round(compute_uniqueness(all_smiles_list) * 100, 1)
+            # Novelty vs nothing (no training set accessible at API time; placeholder)
+            batch_metrics["novelty_note"] = (
+                "Run evaluate.py with --checkpoint for novelty vs training set"
+            )
+            # Similarity among generated molecules (self-similarity as diversity proxy)
+            batch_metrics["internal_similarity"] = round(
+                compute_similarity(all_smiles_list, all_smiles_list), 4
+            )
+        except Exception as e:
+            logger.warning(f"Batch metric computation failed: {e}")
+
+    # Augment per-molecule properties with new metrics if present
+    props = result["properties"]
+    for key in ("atom_stability", "molecule_stable", "connected_fraction"):
+        if key in props:
+            pass  # already present from pipeline
+    props.update({k: v for k, v in props.items()})  # ensure all keys forwarded
+
     # Format response
     response = {
         "job_id": job_id,
@@ -169,13 +196,14 @@ async def generate_molecule(
         "coordinates": result["coords_3d"],
         "atom_types": result["atom_types"],
         "pocket": result["pocket_info"],
-        "properties": result["properties"],
+        "properties": props,
         "stats": {
             "valid_count": result["num_valid"],
             "total_generated": result["num_generated"],
             "validity_rate": round(
                 result["num_valid"] / max(result["num_generated"], 1) * 100, 1
             ),
+            **batch_metrics,
         },
         "timings": result["timings"],
     }

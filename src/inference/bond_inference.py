@@ -335,14 +335,48 @@ def _fail(error: str) -> Dict:
 
 
 def validate_smiles(smiles: str) -> Dict:
-    """Validate a SMILES string and compute basic molecular properties."""
+    """Validate a SMILES string and compute comprehensive molecular properties."""
     try:
         from rdkit import Chem
-        from rdkit.Chem import Descriptors, QED
+        from rdkit.Chem import Descriptors, QED, RDConfig
+        import os, sys
 
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             return {"valid": False, "error": "RDKit could not parse SMILES"}
+
+        # SA Score
+        sa_score = 10.0
+        try:
+            sa_path = os.path.join(RDConfig.RDContribDir, 'SA_Score')
+            if sa_path not in sys.path:
+                sys.path.insert(0, sa_path)
+            import sascorer
+            sa_score = round(sascorer.calculateScore(mol), 3)
+        except Exception:
+            pass
+
+        # Atom & Molecule Stability
+        _ALLOWED_VALENCE = {
+            "C": (1, 4), "N": (1, 3), "O": (1, 2), "S": (1, 6),
+            "F": (1, 1), "Cl": (1, 1), "Br": (1, 1), "I": (1, 1), "P": (1, 5),
+        }
+        stable = []
+        for atom in mol.GetAtoms():
+            sym = atom.GetSymbol()
+            lo, hi = _ALLOWED_VALENCE.get(sym, (0, 99))
+            v = atom.GetTotalValence()
+            stable.append(lo <= v <= hi)
+        n = len(stable)
+        n_stable = sum(stable)
+        atom_stability = round(n_stable / max(n, 1), 4)
+        molecule_stable = bool(atom_stability == 1.0 and n > 0)
+
+        # Connected fraction (largest fragment / total atoms)
+        frags = Chem.GetMolFrags(mol)
+        total_atoms = mol.GetNumAtoms()
+        largest_frag = max(len(f) for f in frags) if frags else 0
+        connected_fraction = round(largest_frag / max(total_atoms, 1), 4)
 
         return {
             "valid": True,
@@ -352,8 +386,12 @@ def validate_smiles(smiles: str) -> Dict:
             "hbd": Descriptors.NumHDonors(mol),
             "hba": Descriptors.NumHAcceptors(mol),
             "qed": round(QED.qed(mol), 4),
+            "sa_score": sa_score,
             "num_atoms": mol.GetNumAtoms(),
             "num_bonds": mol.GetNumBonds(),
+            "atom_stability": atom_stability,
+            "molecule_stable": molecule_stable,
+            "connected_fraction": connected_fraction,
         }
 
     except ImportError:

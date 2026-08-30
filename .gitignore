@@ -24,3 +24,7 @@ training.log
 node_modules/
 .npm_cache/
 final_dataset.json
+.ipynb_checkpoints/
+.tokensave/
+.claude/
+uploads/

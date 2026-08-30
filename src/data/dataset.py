@@ -347,9 +347,18 @@ class SBDDDataset(Dataset):
             pair["affinity"], self.reward_offset, self.reward_scale
         )
 
+        # Extract canonical SMILES for evaluation / reference
+        ligand_smiles = ""
+        try:
+            if mol is not None:
+                ligand_smiles = Chem.MolToSmiles(mol)
+        except Exception:
+            pass
+
         return {
             "pdb_id": pair["pdb_id"],
             "dataset": pair["dataset"],
+            "smiles": ligand_smiles,
             "affinity": torch.tensor(pair["affinity"], dtype=torch.float32),
             "reward": torch.tensor(reward, dtype=torch.float32),
             "weight": torch.tensor(self._weights[idx], dtype=torch.float32),

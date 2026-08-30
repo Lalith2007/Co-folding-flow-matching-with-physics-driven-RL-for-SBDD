@@ -1,20 +1,25 @@
 # ──────────────────────────────────────────────────────────────
-# RL-Guided Flow Diffusion SBDD — SOTA Configuration v2
+# RL-Guided Flow Diffusion SBDD — Default Configuration
 # ──────────────────────────────────────────────────────────────
 
 # ── Paths ──
 data:
-  dataset_json: "final_dataset.json"
-  base_dir: "/home/jovyan/dd_pipeline/datasets"
+  dataset_json: "server_final_dataset.json"
+  # Base directory on the server where pocket/ligand files reside.
+  # The paths in server_final_dataset.json (e.g. "crossdocked/...") are
+  # relative to this directory.
+  base_dir: "/home/jovyan/work/eqgat-diff-main/all_datasets/basedir"
 
 # ── Affinity filtering ──
 affinity:
-  min: -13.0
-  max: -6.0
+  min: -13.0          # kcal/mol — lower bound
+  max: -6.0           # kcal/mol — upper bound
+  # Reward normalisation: r = (|aff| - offset) / scale
+  # Maps [-13, -6] → [1, 0]  (strong binders get reward 1)
   reward_offset: 6.0
   reward_scale: 7.0
 
-# ── Train / Val / Test split ──
+# ── Train / Val / Test split (protein-level) ──
 split:
   train_frac: 0.80
   val_frac: 0.10
@@ -23,20 +28,20 @@ split:
 
 # ── RL curriculum ──
 curriculum:
-  rl_top_percentile: 0.10
-  rl_threshold: -11.0
+  rl_top_percentile: 0.10    # top 10 % strongest binders
+  rl_threshold: -11.0        # approximate affinity cutoff
 
 # ── Pocket featurisation ──
 pocket:
-  cutoff_angstrom: 8.0
-  knn_k: 16
-  element_dim: 15
-  aa_dim: 21
-  hidden_dim: 256       # SOTA v2: scaled up from 128
+  cutoff_angstrom: 8.0       # pocket = residues within 8 Å of ligand
+  knn_k: 16                  # k-nearest-neighbour graph
+  element_dim: 15            # one-hot for elements
+  aa_dim: 21                 # 20 standard + UNK
+  hidden_dim: 128
 
 # ── Ligand featurisation ──
 ligand:
-  atom_types:
+  atom_types:                # 6 drug-like atom types for categorical flow
     - C
     - N
     - O
@@ -44,84 +49,73 @@ ligand:
     - F
     - Cl
   num_atom_types: 6
-  # Empirical marginal prior (computed from CrossDocked2020 training set).
-  # Used as the t=0 noise distribution for discrete flow matching.
-  # Run: python scripts/compute_marginal.py  to recompute from scratch.
-  marginal_prior: [0.5940, 0.1650, 0.1250, 0.0480, 0.0310, 0.0370]
 
 # ── Pocket Encoder ──
 pocket_encoder:
   num_layers: 4
-  hidden_dim: 256       # SOTA v2: scaled up from 128
+  hidden_dim: 128
 
 # ── Core SE(3)-EGNN ──
 egnn:
-  num_layers: 12        # SOTA v2: scaled up from 9
-  hidden_dim: 256       # SOTA v2: scaled up from 128
+  num_layers: 9
+  hidden_dim: 128
   num_heads: 16
   dropout: 0.0
 
 # ── Flow Matching ──
 flow:
-  num_steps_train: 1000
-  num_steps_sample: 50
+  num_steps_train: 1000      # continuous t sampled in [0,1]
+  num_steps_sample: 50       # Euler steps for generation
   sigma_min: 1.0e-5
-
-# ── Self-Conditioning (FlowMol3 technique) ──
-self_conditioning:
-  enabled: true
-  prob: 0.50            # 50% of training steps use self-conditioning
 
 # ── Affinity value head ──
 value_head:
-  hidden_dim: 256       # SOTA v2: scaled up from 128
+  hidden_dim: 128
   num_layers: 2
 
-# ── Multi-objective reward ──
+# ── Multi-objective reward (pharma-grade) ──
 reward:
-  w_vina: 0.40
-  w_qed: 0.20
-  w_sa: 0.15
-  w_lipinski: 0.10
-  w_proxy: 0.10
-  min_carbon_ratio: 0.40
-  max_nitrogen_ratio: 0.35
-  max_nn_bonds: 2
-  max_sa_score: 5.0     # SOTA v2: tightened from 6.0
-  max_ring_nitrogen: 2
+  w_vina: 0.30
+  w_qed: 0.35
+  w_sa: 0.30
+  w_lipinski: 0.05
+  w_proxy: 0.00
+  min_carbon_ratio: 0.40     # ≥40% carbon atoms required (prevents sulfur collapse)
+  max_nitrogen_ratio: 0.35   # ≤35% nitrogen atoms (prevents nitrogen bomb exploit)
+  max_nn_bonds: 2            # ≤2 N-N single bonds (prevents hydrazine/azide chains)
+  max_sa_score: 4.5          # SA ≤ 4.5 (strict synthesizability requirement)
+  max_ring_nitrogen: 2       # ≤2 N atoms per ring (reject fused tetrazoles/pentazoles)
   contrastive_bonus: 0.10
-  vina_every_n: 2       # SOTA v2: every 2 steps (was 10)
-  min_mol_weight: 200.0 # SOTA v2: reject too-small molecules (< 200 Da)
+  vina_every_n: 2            # Vina physics oracle called every 2 RL rounds
 
 # ── Phase A: Pretraining ──
 pretrain:
-  max_steps: 1000000    # SOTA v2: 5x longer (was 200000)
-  batch_size: 16        # SOTA v2: reduced from 32 (larger model)
-  lr: 2.0e-4            # SOTA v2: slightly lower for larger model
+  max_steps: 200000
+  batch_size: 32
+  lr: 3.0e-4
   weight_decay: 1.0e-2
   betas: [0.9, 0.999]
   grad_clip: 1.0
-  affinity_loss_lambda: 0.1
-  affinity_temp: 2.0
-  type_loss_weight: 1.0 # SOTA v2: CE loss is self-normalizing, weight=1 is correct
-  warmup_steps: 10000   # SOTA v2: longer warmup for 1M step schedule
-  eval_every: 10000
-  save_every: 50000
+  affinity_loss_lambda: 0.1  # balance generative vs critic
+  affinity_temp: 2.0         # temperature for softmax weighting
+  type_loss_weight: 5.0      # upweight atom type loss to fix categorical flow
+  eval_every: 2000
+  save_every: 10000
 
-# ── Phase B: RL Fine-tuning ──
+# ── Phase B: RL Fine-tuning (DDPO) ──
 rl:
-  max_steps: 5000        # SOTA v2: 5x longer (was 1000)
-  lr: 5.0e-6             # SOTA v2: lower lr for refined fine-tuning
-  batch_pockets: 2       # SOTA v2: 2 pockets per round
-  mols_per_pocket: 8     # SOTA v2: 8 mols per pocket (was 5)
-  top_k: 3
-  kl_beta_start: 0.005   # SOTA v2: tighter KL for larger model
-  kl_beta_end: 0.0005
+  max_steps: 20000             # 20K RL steps for deep convergence on QED & SA
+  lr: 1.0e-5
+  batch_pockets: 1             # 1 pocket per RL round (focus learning)
+  mols_per_pocket: 5           # generate 5 per pocket
+  top_k: 2                     # keep top-2 for gradient
+  kl_beta_start: 0.05          # Strong coordinate velocity anchor preserving crystal-like 3D geometry
+  kl_beta_end: 0.02            # Sustained anchor preventing geometric bond distortion
   kl_anneal: "cosine"
-  sample_temperature: 1.2  # exploration temperature for atom type sampling
+  save_every: 1000             # save checkpoint every 1000 steps (safe recovery)
 
 # ── Hardware ──
 hardware:
   device: "cuda"
-  num_workers: 0
+  num_workers: 8
   pin_memory: true

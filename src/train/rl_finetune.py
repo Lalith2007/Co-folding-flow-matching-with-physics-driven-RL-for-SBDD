@@ -42,26 +42,117 @@ RDLogger.DisableLog('rdApp.*')  # Suppress noisy C++ valence errors
 logger = logging.getLogger(__name__)
 
 
+def validate_rl(
+    model: FlowMatching,
+    val_pairs: list,
+    base_dir: str,
+    device: str,
+    step: int,
+    reward_oracle: RewardOracle,
+    val_pockets: int = 5,
+    mols_per_pocket: int = 10,
+    log_path: str = "rl_validation_log.jsonl",
+) -> dict:
+    """Lightweight validation: generate molecules for a few pockets, report QED/SA/reward."""
+    import json, random
+    from generate import coords_to_rdkit_mol
+    from rdkit.Chem import QED
+    from ..data.featurizer import PocketFeaturizer
+
+    pocket_featurizer = PocketFeaturizer()
+    base_dir_path = Path(base_dir)
+
+    model.eval()
+    sample_pairs = random.sample(val_pairs, min(val_pockets, len(val_pairs)))
+
+    all_qed, all_sa, all_reward, all_valid = [], [], [], 0
+    total_mols = 0
+
+    with torch.no_grad():
+        for pair in sample_pairs:
+            pocket_path = base_dir_path / pair["pocket_path"]
+            try:
+                pocket_data = pocket_featurizer.featurize(str(pocket_path))
+                if pocket_data["pos"] is None or pocket_data["pos"].shape[0] == 0:
+                    continue
+                pocket_pos  = pocket_data["pos"].to(device)
+                pocket_feat = pocket_data["feat"].to(device)
+            except Exception:
+                continue
+
+            for _ in range(mols_per_pocket):
+                total_mols += 1
+                try:
+                    gen = model.sample(pocket_pos, pocket_feat, temperature=1.0, num_steps=20)
+                    mol, sanitized = coords_to_rdkit_mol(
+                        gen["pos"].cpu().numpy(),
+                        gen["atom_types"].cpu().numpy(),
+                    )
+                    if not sanitized or mol is None:
+                        continue
+                    all_valid += 1
+                    all_qed.append(RewardOracle.compute_qed(mol))
+                    all_sa.append(RewardOracle.compute_sa_raw(mol))
+                    rd = reward_oracle.compute_rl_reward(
+                        mol=mol,
+                        pK_pred=gen["pK_pred"],
+                        pocket_path=str(pocket_path),
+                        pocket_pos_updated=gen.get("pocket_pos_updated"),
+                        rl_round=step,
+                    )
+                    all_reward.append(rd["total_reward"])
+                except Exception:
+                    pass
+
+    model.train()
+
+    stats = {
+        "step": step,
+        "val_validity":    all_valid / max(total_mols, 1),
+        "val_qed_mean":    float(sum(all_qed)   / len(all_qed))   if all_qed   else 0.0,
+        "val_sa_mean":     float(sum(all_sa)    / len(all_sa))    if all_sa    else 0.0,
+        "val_reward_mean": float(sum(all_reward) / len(all_reward)) if all_reward else 0.0,
+        "val_n_valid":     all_valid,
+        "val_n_total":     total_mols,
+    }
+
+    logger.info(
+        f"[VAL step={step}] "
+        f"Validity={stats['val_validity']*100:.1f}% ({all_valid}/{total_mols}) | "
+        f"QED={stats['val_qed_mean']:.4f} | "
+        f"SA={stats['val_sa_mean']:.4f} | "
+        f"Reward={stats['val_reward_mean']:.4f}"
+    )
+
+    # Append to JSONL log for later plotting
+    with open(log_path, "a") as f:
+        f.write(json.dumps(stats) + "\n")
+
+    return stats
+
+
 def rl_finetune(
     model: FlowMatching,
     pretrained_checkpoint: str,
     train_pairs: list,
     base_dir: str,
-    max_steps: int = 5000,        # SOTA v2: 5x more RL steps
-    lr: float = 5e-6,             # SOTA v2: lower lr for larger model
-    batch_pockets: int = 2,       # SOTA v2: 2 pockets per round
-    mols_per_pocket: int = 8,     # SOTA v2: 8 mols per pocket
-    top_k: int = 3,
-    kl_beta_start: float = 0.005, # SOTA v2: tighter KL for larger model
-    kl_beta_end: float = 0.0005,
-    vina_every_n: int = 2,        # SOTA v2: Vina every 2 steps
+    val_pairs: list = None,
+    resume_checkpoint: str = None,
+    max_steps: int = 50_000,
+    lr: float = 1e-5,
+    batch_pockets: int = 32,
+    mols_per_pocket: int = 100,
+    top_k: int = 10,
+    kl_beta_start: float = 0.01,
+    kl_beta_end: float = 0.001,
+    vina_every_n: int = 10,
     curriculum_every: int = 500,
-    save_every: int = 500,
+    val_every: int = 500,
+    save_every: int = 1000,
     save_dir: str = "checkpoints",
     device: str = "cuda",
     reward_offset: float = 6.0,
     reward_scale: float = 7.0,
-    marginal: torch.Tensor = None, # (num_atom_types,) empirical prior for SOTA v2
 ):
     """Run Phase B DDPO RL fine-tuning.
 
@@ -71,20 +162,24 @@ def rl_finetune(
     pretrained_checkpoint: path to θ₀ checkpoint for KL penalty
     train_pairs          : training pairs from dataset
     base_dir             : server base directory for file access
-    max_steps            : total RL steps (50K)
+    val_pairs            : held-out validation pairs (optional, subset of val split)
+    resume_checkpoint    : path to intermediate rl_step*.pt to resume optimizer & step
+    max_steps            : total RL steps
     lr                   : learning rate (1e-5, 10× smaller than pretrain)
     batch_pockets        : pockets per RL round
     mols_per_pocket      : molecules generated per pocket
     top_k                : top-k molecules kept for gradient update
     kl_beta_start/end    : KL penalty β annealing range
+    val_every            : run validation every N steps (default: 500)
+    save_every           : save checkpoint every N steps (default: 1000)
     """
     save_path = Path(save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
 
     # Load pretrained model as frozen reference (θ₀) for KL penalty
     model_ref = copy.deepcopy(model)
-    ckpt = torch.load(pretrained_checkpoint, map_location=device)
-    model_ref.load_state_dict(ckpt["model_state_dict"], strict=False)
+    ref_ckpt = torch.load(pretrained_checkpoint, map_location=device)
+    model_ref.load_state_dict(ref_ckpt["model_state_dict"], strict=False)
     model_ref = model_ref.to(device)
     model_ref.eval()
     for p in model_ref.parameters():
@@ -95,6 +190,18 @@ def rl_finetune(
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+    # Restore step and optimizer if resuming
+    step = 0
+    if resume_checkpoint and Path(resume_checkpoint).exists():
+        ckpt = torch.load(resume_checkpoint, map_location=device)
+        step = ckpt.get("step", 0)
+        if "optimizer_state_dict" in ckpt:
+            try:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            except Exception:
+                pass
+        logger.info(f"Resumed RL training at step {step} from {resume_checkpoint}")
+
     # KL β schedule
     beta_schedule = CosineBetaSchedule(kl_beta_start, kl_beta_end, max_steps)
 
@@ -104,32 +211,34 @@ def rl_finetune(
         min_carbon_ratio=0.40,
         max_nitrogen_ratio=0.35,
         max_nn_bonds=2,
-        max_sa_score=5.0,          # SOTA v2: tightened from 6.0
+        max_sa_score=6.0,
         max_ring_nitrogen=2,
-        min_mol_weight=200.0,      # SOTA v2: MW gate
     )
 
     # RL curriculum: start with easy pockets, increase difficulty
-    rl_pairs = get_rl_subset(train_pairs, threshold=-11.0)
-
-    # Difficulty levels (affinity thresholds)
     difficulty_levels = [-7.0, -8.0, -9.0, -10.0, -11.0]
-    current_difficulty = 0
+    current_difficulty = min(step // curriculum_every, len(difficulty_levels) - 1)
+    threshold = difficulty_levels[current_difficulty]
+    rl_pairs = get_rl_subset(train_pairs, threshold=threshold)
 
-    step = 0
     t_start = time.time()
 
     logger.info(
-        f"Starting RL fine-tuning: {max_steps} steps, lr={lr}, "
-        f"β={kl_beta_start}→{kl_beta_end}"
+        f"RL fine-tuning step {step}/{max_steps}, lr={lr}, "
+        f"β={kl_beta_start}→{kl_beta_end}, difficulty={current_difficulty} ({threshold} kcal/mol)"
     )
 
     from tqdm import tqdm
-    pbar = tqdm(total=max_steps, initial=0, desc="RL Phase B")
+    is_main_process = True
+    if torch.distributed.is_initialized():
+        is_main_process = (torch.distributed.get_rank() == 0)
 
-    # Need featurizer to load pocket data on the fly
+    pbar = tqdm(total=max_steps, initial=step, desc="RL Phase B", disable=not is_main_process)
+
+    # Need featurizer to load pocket data on the fly (with in-memory cache)
     from ..data.featurizer import PocketFeaturizer
     pocket_featurizer = PocketFeaturizer()
+    pocket_cache = {}
     base_dir_path = Path(base_dir)
 
     while step < max_steps:
@@ -158,43 +267,52 @@ def rl_finetune(
         n_mols = 0
 
         for pair in pocket_sample:
-            # Load pocket data on the fly
+            # Load pocket data on the fly (cached in RAM)
             pocket_path = base_dir_path / pair["pocket_path"]
-            try:
-                pocket_data = pocket_featurizer.featurize(str(pocket_path))
-                if pocket_data["pos"] is None or pocket_data["pos"].shape[0] == 0:
+            pocket_key = str(pocket_path)
+            if pocket_key not in pocket_cache:
+                try:
+                    pocket_data = pocket_featurizer.featurize(pocket_key)
+                    if pocket_data["pos"] is None or pocket_data["pos"].shape[0] == 0:
+                        continue
+                    pocket_cache[pocket_key] = (
+                        pocket_data["pos"].to(device),
+                        pocket_data["feat"].to(device),
+                    )
+                except Exception:
                     continue
-                pocket_pos = pocket_data["pos"].to(device)
-                pocket_feat = pocket_data["feat"].to(device)
-            except Exception:
-                continue
+            pocket_pos, pocket_feat = pocket_cache[pocket_key]
 
-            # ── Step 1: Generate molecules (no grad for speed) ──
+            # ── Step 1: Generate molecules (no grad, 20-step Euler rollout for high speed) ──
+            # Temperature annealing: 1.2 (explore) → 0.8 (exploit drug-like molecules)
+            # This matches RLHF best practice: high temperature early, low temperature late
+            progress = min(step / max_steps, 1.0)
+            temperature = 1.2 - 0.4 * progress  # 1.2 → 0.8 linearly
             with torch.no_grad():
                 candidates = []
                 for _ in range(mols_per_pocket):
-                    gen = model.sample(
-                        pocket_pos, pocket_feat,
-                        temperature=1.2,    # >1 for diverse atom type exploration
-                        marginal=marginal,  # SOTA v2: marginal prior init
-                    )
+                    gen = model.sample(pocket_pos, pocket_feat, temperature=temperature, num_steps=20)
                     candidates.append(gen)
 
             # ── Step 2: Score with FULL multi-objective reward ──
             # This prevents reward hacking: the model can't maximize
             # proxy affinity at the expense of drug-likeness.
             rewards = []
-            for gen in candidates:
+            _log_this_batch = (step % 10 == 0)  # log every 10 steps for diagnosis
+            for gen_idx, gen in enumerate(candidates):
                 # Reconstruct RDKit molecule for chemical metrics
                 try:
                     from generate import coords_to_rdkit_mol
-                    
+
                     pos_np = gen["pos"].cpu().numpy()
                     types_np = gen["atom_types"].cpu().numpy()
 
                     mol, sanitized = coords_to_rdkit_mol(pos_np, types_np)
                     if not sanitized or mol is None:
-                        raise ValueError("Failed to sanitize molecule")
+                        if _log_this_batch and gen_idx == 0:
+                            logger.warning(f"[REWARD DEBUG] Step {step}: mol reconstruction FAILED (sanitized={sanitized})")
+                        rewards.append(0.0)
+                        continue
 
                     reward_dict = reward_oracle.compute_rl_reward(
                         mol=mol,
@@ -204,10 +322,25 @@ def rl_finetune(
                         rl_round=step,
                     )
                     r = reward_dict["total_reward"]
-                except Exception:
-                    # Hard penalty for molecules that can't be reconstructed
-                    # (prevents reward hacking with invalid chemistry)
-                    # MUST BE >= 0.0 to prevent unbaselined REINFORCE from exploding
+
+                    # ── Diagnostic log: print component rewards to find R=0 root cause ──
+                    if _log_this_batch and gen_idx == 0:
+                        gate = reward_dict.get('gate_reason', '?')
+                        cq   = reward_dict.get('chem_quality', -1)
+                        rq   = reward_dict.get('r_qed', -1)
+                        rp   = reward_dict.get('r_proxy', -1)
+                        cr   = reward_dict.get('carbon_ratio', -1)
+                        nr   = reward_dict.get('nitrogen_ratio', -1)
+                        logger.info(
+                            f"[REWARD DEBUG] step={step} R={r:.4f} "
+                            f"chem_q={cq:.3f} r_qed={rq:.3f} r_proxy={rp:.3f} "
+                            f"C_ratio={cr:.2f} N_ratio={nr:.2f} gate={gate}"
+                        )
+
+                except Exception as exc:
+                    # Log first error per batch so we can diagnose the root cause
+                    if _log_this_batch:
+                        logger.warning(f"[REWARD DEBUG] Step {step}: exception in reward: {type(exc).__name__}: {exc}")
                     r = 0.0
                 rewards.append(r)
 
@@ -228,20 +361,16 @@ def rl_finetune(
                 N_L = gen["num_atoms"]
                 z_coord = torch.randn(N_L, 3, device=device)
                 z_coord = z_coord - z_coord.mean(0, keepdim=True)
+                z_type = torch.ones(
+                    N_L, model.egnn.num_atom_types, device=device
+                ) / model.egnn.num_atom_types
+                h_L_raw = torch.zeros(N_L, 4, device=device)  # 4 non-element features: aromatic, degree, charge, ring
 
-                # SOTA v2: start from marginal prior (not uniform)
-                if marginal is not None:
-                    z_type = marginal.to(device).unsqueeze(0).expand(N_L, -1).clone().float()
-                else:
-                    z_type = torch.ones(N_L, model.egnn.num_atom_types, device=device) / model.egnn.num_atom_types
-                h_L_raw = torch.zeros(N_L, 4, device=device)
-
-                # Use fewer ODE steps for RL (20 vs 50) — faster, still good enough
-                rl_num_steps = 20
+                # Use 10 ODE steps for RL policy gradient backprop (linear flow enables
+                # fast 10-step BPTT with lower gradient variance and 2x faster wall-clock speed)
+                rl_num_steps = 10
                 dt = 1.0 / rl_num_steps
                 log_prob = torch.tensor(0.0, device=device)
-                # SOTA v2: self-conditioning accumulation in gradient loop
-                sc_prior = torch.zeros(N_L, model.egnn.num_atom_types, device=device)
 
                 for s in range(rl_num_steps):
                     t_val = s * dt
@@ -253,43 +382,50 @@ def rl_finetune(
                         atom_types_onehot=z_type,
                         t=t,
                         h_P=h_P,
-                        sc_prior=sc_prior,
                     )
 
-                    # Coordinate: velocity-norm proxy for log_prob
+                    # Approximate log p: ||v_coord||² proxy for coordinate policy
+                    # (Full change-of-variables trace is expensive;
+                    #  using velocity norm as proxy for policy gradient)
                     vel = out["vel_coord"]
                     log_prob = log_prob - 0.5 * (vel ** 2).sum() * dt
 
                     z_coord = z_coord + vel * dt
+                    z_type = z_type + out["vel_type"] * dt
                     z_coord = z_coord - z_coord.mean(0, keepdim=True)
 
-                    # SOTA v2: x1-prediction velocity for atom types
-                    pred_x1 = F.softmax(out["type_logits"], dim=-1)
-                    vel_type = (pred_x1 - z_type) / (1.0 - t_val + 1e-8)
-                    z_type = z_type + vel_type * dt
-                    # Update self-conditioning prior (detach to avoid graph growth)
-                    sc_prior = pred_x1.detach()
-
-                # Atom type log probability from final accumulated type distribution
+                # ── Atom type REINFORCE via re-run z_type (with live gradient) ──
+                # Use z_type from the re-run ODE — NOT z_type_final from gen[].
+                #
+                # z_type_final comes from the no-grad rollout, so requires_grad=False.
+                # Using it makes the entire atom_type_log_prob a constant in the
+                # computation graph, giving vel_type_head ZERO REINFORCE gradient.
+                #
+                # z_type from the re-run ODE accumulates through vel_type_head
+                # (trainable), so requires_grad=True → gradient flows.
+                #
+                # Yes, sampled_types come from the original no-grad trajectory
+                # (a different random seed), creating a trajectory mismatch.
+                # But a biased gradient >> zero gradient, and this is no worse
+                # than the coord log_prob approximation (which also uses different
+                # initial noise and is acknowledged as a proxy).
+                norm_probs = F.softmax(z_type, dim=-1)  # z_type from re-run: HAS grad
+                atom_type_log_prob = torch.log(norm_probs + 1e-8)
                 sampled_types = gen["atom_types"].to(device)
-                type_probs_grad = F.softmax(z_type / 1.2, dim=-1).clamp(min=1e-8)  # match sampling temperature
-                atom_type_log_prob = type_probs_grad.log()
-                log_prob = log_prob + 0.1 * atom_type_log_prob[
+                log_prob = log_prob + 0.3 * atom_type_log_prob[
                     torch.arange(N_L, device=device), sampled_types
                 ].sum()
 
-                # ── Entropy reward: r_entropy = -H(softmax(v_type)) ──
-                # Lower entropy = more confident atom types = better
-                type_probs = F.softmax(z_type, dim=-1).clamp(min=1e-8)
-                entropy = -(type_probs * type_probs.log()).sum(dim=-1).mean()
-                # Normalise to [0, 1]: max entropy = log(10) ≈ 2.3
+                # ── Entropy reward: r_entropy = -H(p_type) ──
+                entropy = -(norm_probs * (norm_probs + 1e-8).log()).sum(dim=-1).mean()
                 import math
                 r_entropy = max(0.0, 1.0 - entropy.item() / math.log(model.egnn.num_atom_types))
-                # Add entropy to reward (weighted 0.1) — only for valid molecules
                 if r > 0:
                     r = r + 0.1 * r_entropy
 
-                # ── KL penalty against θ₀ ──
+                # ── KL penalty against θ₀ (Coordinate geometry only) ──
+                # Anchors 3D pocket conformation to preserve 51.5% PoseBusters validity,
+                # while allowing atom types to freely explore Nitrogen and Oxygen.
                 with torch.no_grad():
                     ref_enc = model_ref.pocket_encoder(pocket_pos, pocket_feat)
                     h_P_ref = ref_enc["h_P"]
@@ -305,7 +441,6 @@ def rl_finetune(
                         h_P=h_P_ref,
                     )
                 
-                # Compute current model's output WITH gradients so the KL penalty can backpropagate
                 cur_out = model.egnn(
                     x_L=z_coord_ref,
                     h_L_raw=h_L_raw,
@@ -314,19 +449,35 @@ def rl_finetune(
                     h_P=h_P,
                 )
 
-                # KL: MSE on coordinate velocity + CE on type logits vs reference
                 kl_coord = F.mse_loss(cur_out["vel_coord"], ref_out["vel_coord"])
-                # SOTA v2: KL on type_logits (x1 prediction)
-                kl_type = F.kl_div(
-                    F.log_softmax(cur_out["type_logits"], dim=-1),
-                    F.softmax(ref_out["type_logits"].detach(), dim=-1),
-                    reduction="batchmean"
+                kl_loss  = kl_coord
+
+                # ── Continuous Pharma Stoichiometry Loss ──
+                # Provides direct, unconditional gradient toward 18% N, 10% O, 70% C
+                # on EVERY step regardless of what atom types were sampled.
+                #
+                # CRITICAL: Use z_type from the re-run ODE loop (has requires_grad=True
+                # because it accumulated via trainable vel_type_head).
+                # DO NOT use z_type_final from gen[] — that came from the no-grad
+                # rollout, so requires_grad=False and backward() would be a no-op.
+                #
+                # BUG FIX (reduction): Use 'sum' NOT 'batchmean'.
+                # F.kl_div batchmean divides by first dim. For shape (6,), it divides
+                # by 6, making stoich 6× weaker than intended.
+                #
+                # BUG FIX (weight): 1.5 (was 0.15).
+                # rl_loss = -log_prob * r ≈ 30–50. 0.15 * 0.02 = 0.003 → 0.006% rel.
+                # 1.5 gives ~5% relative gradient — enough to emerge Nitrogen.
+                p_target = torch.tensor([0.70, 0.18, 0.10, 0.01, 0.005, 0.005], device=device)
+                mean_pred_p = F.softmax(z_type, dim=-1).mean(dim=0)  # z_type from re-run: HAS grad
+                stoich_loss = F.kl_div(
+                    torch.log(mean_pred_p + 1e-8),
+                    p_target,
+                    reduction='sum'   # NOT batchmean — batchmean divides by 6 for shape (6,)
                 )
-                kl_loss  = kl_coord + 0.5 * kl_type
 
-
-                # ── DDPO loss: -log_p * R + β * KL ──
-                rl_loss = -log_prob * r + beta * kl_loss
+                # ── DDPO loss: -log_p * R + β * KL_coord + λ * Stoich ──
+                rl_loss = -log_prob * r + beta * kl_loss + 1.5 * stoich_loss
 
                 rl_loss.backward()
 
@@ -340,6 +491,9 @@ def rl_finetune(
             for p in model.parameters():
                 if p.grad is not None:
                     p.grad /= n_mols
+                    if torch.distributed.is_initialized():
+                        torch.distributed.all_reduce(p.grad, op=torch.distributed.ReduceOp.SUM)
+                        p.grad /= torch.distributed.get_world_size()
 
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -347,8 +501,8 @@ def rl_finetune(
         step += 1
         pbar.update(1)
 
-        # ── Logging ──
-        if step % 10 == 0 and n_mols > 0:
+        # ── Logging (rank 0 only) ──
+        if is_main_process and step % 10 == 0 and n_mols > 0:
             avg_r = total_reward / n_mols
             avg_rl = total_rl_loss / n_mols
             avg_kl = total_kl_loss / n_mols
@@ -373,13 +527,29 @@ def rl_finetune(
             )
             threshold = difficulty_levels[current_difficulty]
             rl_pairs = get_rl_subset(train_pairs, threshold=threshold)
-            logger.info(
-                f"  Curriculum update: difficulty={current_difficulty}, "
-                f"threshold={threshold}, pairs={len(rl_pairs)}"
+            if is_main_process:
+                logger.info(
+                    f"  Curriculum update: difficulty={current_difficulty}, "
+                    f"threshold={threshold}, pairs={len(rl_pairs)}"
+                )
+
+        # ── Validation every val_every steps (rank 0 only) ──
+        if is_main_process and step % val_every == 0 and val_pairs:
+            val_log_path = str(Path(save_dir) / "rl_validation_log.jsonl")
+            validate_rl(
+                model=model,
+                val_pairs=val_pairs,
+                base_dir=base_dir,
+                device=device,
+                step=step,
+                reward_oracle=reward_oracle,
+                val_pockets=5,
+                mols_per_pocket=10,
+                log_path=val_log_path,
             )
 
-        # ── Checkpointing ──
-        if step % save_every == 0:
+        # ── Checkpointing (rank 0 only) ──
+        if is_main_process and step % save_every == 0:
             ckpt_path = save_path / f"rl_step{step}.pt"
             torch.save({
                 "step": step,
@@ -388,13 +558,14 @@ def rl_finetune(
             }, ckpt_path)
             logger.info(f"  Saved RL checkpoint: {ckpt_path}")
 
-    # Final save
-    final_path = save_path / "rl_final.pt"
-    torch.save({
-        "step": step,
-        "model_state_dict": model.state_dict(),
-    }, final_path)
-    logger.info(f"RL fine-tuning complete. Final checkpoint: {final_path}")
+    # Final save (rank 0 only)
+    if is_main_process:
+        final_path = save_path / "rl_final.pt"
+        torch.save({
+            "step": step,
+            "model_state_dict": model.state_dict(),
+        }, final_path)
+        logger.info(f"RL fine-tuning complete. Final checkpoint: {final_path}")
     pbar.close()
 
     return model

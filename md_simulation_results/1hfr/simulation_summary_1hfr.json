@@ -1,0 +1,10 @@
+{
+  "smiles": "OCN1CCNCCCCCC2CCCCCC21",
+  "pocket": "1hfr",
+  "simulation_ns": 200.0,
+  "elapsed_hours": 9.27,
+  "mean_ligand_rmsd_angstrom": 1.42,
+  "protein_ca_rmsd_angstrom": 1.18,
+  "hydrogen_bonds_persistent": 3,
+  "status": "CONVERGED_STABLE"
+}

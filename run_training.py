@@ -25,6 +25,15 @@ Usage:
 
 from __future__ import annotations
 
+import os
+# Cap OpenBLAS / MKL / OMP threads before any C libraries load
+os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["MKL_NUM_THREADS"] = "2"
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+os.environ["NUMEXPR_NUM_THREADS"] = "2"
+os.environ["TORCH_NUM_THREADS"] = "2"
+
 import argparse
 import logging
 import sys
@@ -32,6 +41,7 @@ from pathlib import Path
 
 import yaml
 import torch
+torch.set_num_threads(2)
 import glob
 import re
 
@@ -69,7 +79,7 @@ def build_model(cfg: dict, device: str) -> "FlowMatching":
     )
 
     egnn = SE3EGNN(
-        ligand_in_dim=4,
+        ligand_in_dim=4,  # 4 non-element features: aromatic, degree, charge, ring
         pocket_dim=cfg["egnn"]["hidden_dim"],
         hidden_dim=cfg["egnn"]["hidden_dim"],
         num_layers=cfg["egnn"]["num_layers"],
@@ -144,25 +154,20 @@ def build_datasets(cfg: dict):
 
 
 def get_latest_checkpoint(prefix: str, save_dir: str = "checkpoints") -> str | None:
-    """Find the latest checkpoint file matching a prefix (e.g. 'pretrain_step')."""
+    """Find the latest checkpoint file matching a prefix (e.g. 'pretrain_step' or 'rl_step')."""
     path = Path(save_dir)
     if not path.exists():
         return None
     
-    # E.g. find all checkpoints/pretrain_step*.pt
+    # E.g. find all checkpoints/rl_step*.pt
     files = list(path.glob(f"{prefix}*.pt"))
     if not files:
         return None
         
-    # Extract the step number using regex to find the highest one
     latest_file = None
     max_step = -1
     
     for f in files:
-        # Check if it's the final checkpoint first
-        if f.name == f"{prefix.split('_')[0]}_final.pt":
-            return str(f)
-            
         match = re.search(r"step(\d+)\.pt", f.name)
         if match:
             step = int(match.group(1))
@@ -195,17 +200,6 @@ def run_phase_a(
         opt_state = ckpt.get("optimizer_state_dict", None)
 
     pt_cfg = cfg["pretrain"]
-    sc_cfg = cfg.get("self_conditioning", {})
-
-    # Load marginal prior: try npy file first, fall back to config values
-    import numpy as np, os
-    marginal = None
-    if os.path.exists("marginal_prior.npy"):
-        marginal = torch.tensor(np.load("marginal_prior.npy"), dtype=torch.float32).to(device)
-        logger.info(f"Loaded marginal prior from marginal_prior.npy: {marginal.tolist()}")
-    elif "marginal_prior" in cfg.get("ligand", {}):
-        marginal = torch.tensor(cfg["ligand"]["marginal_prior"], dtype=torch.float32).to(device)
-        logger.info(f"Using marginal prior from config: {marginal.tolist()}")
 
     model = pretrain(
         model=model,
@@ -218,7 +212,7 @@ def run_phase_a(
         betas=tuple(pt_cfg["betas"]),
         grad_clip=pt_cfg["grad_clip"],
         affinity_lambda=pt_cfg["affinity_loss_lambda"],
-        type_loss_weight=pt_cfg.get("type_loss_weight", 1.0),
+        type_loss_weight=pt_cfg.get("type_loss_weight", 5.0),
         eval_every=pt_cfg["eval_every"],
         save_every=pt_cfg["save_every"],
         save_dir="checkpoints",
@@ -227,16 +221,13 @@ def run_phase_a(
         reward_scale=cfg["affinity"]["reward_scale"],
         start_step=start_step,
         optimizer_state=opt_state,
-        marginal=marginal,
-        sc_prob=sc_cfg.get("prob", 0.5),
-        warmup_steps=pt_cfg.get("warmup_steps", 10000),
     )
 
     logger.info("Phase A complete. Checkpoint: checkpoints/pretrain_final.pt")
     return model
 
 
-def run_phase_b(model, cfg, train_pairs, device, checkpoint=None):
+def run_phase_b(model, cfg, train_pairs, val_pairs, device, checkpoint=None):
     """Phase B: DDPO RL fine-tuning."""
     from src.train.rl_finetune import rl_finetune
 
@@ -244,33 +235,37 @@ def run_phase_b(model, cfg, train_pairs, device, checkpoint=None):
     logger.info("PHASE B: RL FINE-TUNING (DDPO)")
     logger.info("=" * 60)
 
-    pretrained_ckpt = checkpoint or "checkpoints/pretrain_final.pt"
-    if not Path(pretrained_ckpt).exists():
+    pretrained_ref_ckpt = "checkpoints/pretrain_final.pt"
+    if not Path(pretrained_ref_ckpt).exists():
         logger.error(
-            f"Pretrained checkpoint not found: {pretrained_ckpt}. "
+            f"Pretrained reference checkpoint not found: {pretrained_ref_ckpt}. "
             f"Run Phase A first."
         )
         return model
 
-    # Load the pretrained weights into the model
-    ckpt = torch.load(pretrained_ckpt, map_location=device)
+    # Determine if resuming from an intermediate RL checkpoint or starting from pretrain
+    resume_ckpt = None
+    if checkpoint and Path(checkpoint).exists():
+        target_ckpt = checkpoint
+        if "rl_step" in checkpoint:
+            resume_ckpt = checkpoint
+            logger.info(f"Resuming RL training from checkpoint: {resume_ckpt}")
+    else:
+        target_ckpt = pretrained_ref_ckpt
+        logger.info(f"Starting RL training from pretrained: {target_ckpt}")
+
+    # Load weights into the model
+    ckpt = torch.load(target_ckpt, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
 
     rl_cfg = cfg["rl"]
-    reward_cfg = cfg.get("reward", {})
-
-    # Load marginal prior (same as Phase A)
-    import numpy as np, os
-    marginal = None
-    if os.path.exists("marginal_prior.npy"):
-        marginal = torch.tensor(np.load("marginal_prior.npy"), dtype=torch.float32).to(device)
-    elif "marginal_prior" in cfg.get("ligand", {}):
-        marginal = torch.tensor(cfg["ligand"]["marginal_prior"], dtype=torch.float32).to(device)
 
     model = rl_finetune(
         model=model,
-        pretrained_checkpoint=pretrained_ckpt,
+        pretrained_checkpoint=pretrained_ref_ckpt,
         train_pairs=train_pairs,
+        val_pairs=val_pairs,
+        resume_checkpoint=resume_ckpt,
         base_dir=cfg["data"]["base_dir"],
         max_steps=rl_cfg["max_steps"],
         lr=rl_cfg["lr"],
@@ -279,12 +274,12 @@ def run_phase_b(model, cfg, train_pairs, device, checkpoint=None):
         top_k=rl_cfg["top_k"],
         kl_beta_start=rl_cfg["kl_beta_start"],
         kl_beta_end=rl_cfg["kl_beta_end"],
-        vina_every_n=reward_cfg.get("vina_every_n", 2),
+        val_every=500,
+        save_every=rl_cfg.get("save_every", 1000),
         save_dir="checkpoints",
         device=device,
         reward_offset=cfg["affinity"]["reward_offset"],
         reward_scale=cfg["affinity"]["reward_scale"],
-        marginal=marginal,
     )
 
     logger.info("Phase B complete. Checkpoint: checkpoints/rl_final.pt")
@@ -358,6 +353,10 @@ Examples:
         "--max_steps", type=int, default=None,
         help="Override max training steps for Phase A. Useful for warm-up runs."
     )
+    parser.add_argument(
+        "--single", action="store_true", default=False,
+        help="Run on single GPU (for MIG single-slice execution)."
+    )
     args = parser.parse_args()
 
     # Load config
@@ -369,10 +368,13 @@ Examples:
 
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if local_rank != -1:
-        dist.init_process_group(backend="nccl")
+        # Use gloo backend — NCCL doesn't support MIG (Multi-Instance GPU) because
+        # all MIG slices share the same physical PCIe device ID, which NCCL rejects
+        # as "Duplicate GPU". Gloo uses shared memory / TCP and works correctly.
+        dist.init_process_group(backend="gloo")
         device = f"cuda:{local_rank}"
         torch.cuda.set_device(device)
-        logger.info(f"DDP Initialized. Rank: {local_rank}, Device: {device}")
+        logger.info(f"DDP Initialized (gloo). Rank: {local_rank}, Device: {device}")
     else:
         # Device
         device = args.device or cfg["hardware"]["device"]
@@ -419,8 +421,9 @@ Examples:
         )
 
     if "B" in phases:
+        val_pairs = val_dataset.pairs if hasattr(val_dataset, "pairs") else []
         model = run_phase_b(
-            model, cfg, train_pairs, device,
+            model, cfg, train_pairs, val_pairs, device,
             checkpoint=start_ckpt if "B" == phases[0] else None,
         )
 

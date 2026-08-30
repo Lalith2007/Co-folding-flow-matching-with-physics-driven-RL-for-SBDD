@@ -55,9 +55,245 @@ MEDCHEM_ALERTS = [
     "[N;X2]=[N;X2]",               # Azo compound (dyes, not drugs)
     "[#6]([F])([F])([F])",          # Trifluoromethyl (sometimes okay, flag it)
 ]
+def _pdb_to_pdbqt_receptor(pdb_path: str) -> str:
+    """Robust, C++-safe conversion of protein PDB to PDBQT format for AutoDock Vina."""
+    pdbqt_lines = []
+    with open(pdb_path, "r") as f:
+        for line in f:
+            if line.startswith(("ATOM  ", "HETATM")):
+                line_str = line.rstrip("\n")
+                if len(line_str) < 54:
+                    continue
+
+                atom_type_hdr = line_str[0:6]
+                atom_id = line_str[6:11]
+                atom_name = line_str[12:16]
+                res_name = line_str[17:20] if len(line_str) >= 20 else "ALA"
+                chain_id = line_str[21:22] if len(line_str) >= 22 else "A"
+                res_seq = line_str[22:26] if len(line_str) >= 26 else "   1"
+
+                try:
+                    x = float(line_str[30:38])
+                    y = float(line_str[38:46])
+                    z = float(line_str[46:54])
+                except ValueError:
+                    continue
+
+                elem = line_str[76:78].strip() if len(line_str) >= 78 else ""
+                if not elem:
+                    name_clean = "".join([c for c in atom_name if c.isalpha()]).upper()
+                    if name_clean.startswith(("CA", "CB", "CG", "CD", "CE", "CZ", "CH")):
+                        elem = "C"
+                    elif name_clean.startswith(("NH", "NE", "ND", "NZ")):
+                        elem = "N"
+                    elif name_clean.startswith(("OG", "OD", "OE", "OH")):
+                        elem = "O"
+                    elif name_clean.startswith("SG"):
+                        elem = "S"
+                    else:
+                        elem = name_clean[:1] if name_clean else "C"
+
+                ad_type = elem
+                if elem == "O":
+                    ad_type = "OA"
+                elif elem == "S":
+                    ad_type = "SA"
+
+                formatted = (
+                    f"{atom_type_hdr:<6s}{atom_id:>5s} {atom_name:<4s} {res_name:>3s} {chain_id:1s}"
+                    f"{res_seq:>4s}    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00    +0.000 {ad_type:>2s}"
+                )
+                pdbqt_lines.append(formatted)
+    return "\n".join(pdbqt_lines) + "\n"
+
+
+def compute_raw_vina_energy_fn(
+    mol,
+    pocket_path: str,
+    pocket_pos_updated: torch.Tensor = None,
+    center: tuple = None,
+    box_size: tuple = (20.0, 20.0, 20.0),
+) -> float | None:
+    """Run AutoDock Vina and return raw binding energy in kcal/mol (e.g., -7.8 kcal/mol)."""
+    import os
+    import tempfile
+
+    def _mol_to_pdbqt_string(rdkit_mol):
+        from rdkit import Chem
+        # Tier 1: Try Meeko (0.7.1 API)
+        try:
+            from meeko import MoleculePreparation, PDBQTWriterLegacy
+            m = Chem.Mol(rdkit_mol)
+            try:
+                Chem.SanitizeMol(m)
+            except Exception:
+                pass
+            prep = MoleculePreparation()
+            res = prep.prepare(m)
+            if res is not None:
+                item = res[0] if (isinstance(res, list) and res) else res
+                try:
+                    pdbqt_str, is_ok, err = PDBQTWriterLegacy.write_string(item)
+                    if pdbqt_str and len(pdbqt_str) > 20:
+                        return pdbqt_str
+                except Exception:
+                    pass
+                if hasattr(prep, 'write_pdbqt_string'):
+                    s = prep.write_pdbqt_string()
+                    if s and len(s) > 20:
+                        return s
+        except Exception:
+            pass
+
+        # Tier 2: Strict fixed-width PDBQT fallback with correct AutoDock atom types
+        _AD_TYPE = {
+            "C": "C", "N": "NA", "O": "OA", "S": "SA",
+            "F": "F", "Cl": "Cl", "Br": "Br", "I": "I",
+            "P": "P", "H": "HD",
+        }
+        try:
+            if rdkit_mol.GetNumConformers() == 0:
+                return None
+            conf = rdkit_mol.GetConformer()
+            lines = ["REMARK  VINA SCORE EVAL FALLBACK", "ROOT"]
+            for a in rdkit_mol.GetAtoms():
+                if a.GetAtomicNum() == 1:
+                    continue  # Skip hydrogens
+                idx = a.GetIdx() + 1
+                sym = a.GetSymbol()
+                pos = conf.GetAtomPosition(a.GetIdx())
+                is_arom = a.GetIsAromatic()
+                if sym == "C":
+                    ad_type = "A" if is_arom else "C"
+                elif sym == "N":
+                    ad_type = "NA" if (is_arom or a.GetTotalNumHs() == 0) else "N"
+                elif sym == "O":
+                    ad_type = "OA"
+                elif sym == "S":
+                    ad_type = "SA"
+                else:
+                    ad_type = _AD_TYPE.get(sym, "C")
+                atom_name = f"{sym:<4s}"
+                lines.append(
+                    f"ATOM  {idx:>5d} {atom_name} LIG A   1    "
+                    f"{pos.x:8.3f}{pos.y:8.3f}{pos.z:8.3f}  1.00  0.00    +0.000 {ad_type:>2s}"
+                )
+            lines.append("ENDROOT")
+            lines.append("TORSDOF 0")
+            return "\n".join(lines) + "\n"
+        except Exception:
+            return None
+
+    try:
+        from vina import Vina
+        from rdkit import Chem
+        from pathlib import Path
+
+        ligand_pdbqt = _mol_to_pdbqt_string(mol)
+        if ligand_pdbqt is None:
+            return None
+
+        pocket_path_obj = Path(pocket_path)
+        pocket_pdbqt = pocket_path_obj.with_suffix(".pdbqt")
+
+        if pocket_pos_updated is not None or not pocket_pdbqt.exists():
+            path_to_parse = str(pocket_path)
+            rec_string = _pdb_to_pdbqt_receptor(path_to_parse)
+
+            fd, temp_rec_path = tempfile.mkstemp(suffix='.pdbqt')
+            os.write(fd, rec_string.encode('utf-8'))
+            os.close(fd)
+            rec_path_to_use = temp_rec_path
+            temp_rec_created = True
+        else:
+            rec_path_to_use = str(pocket_pdbqt)
+            temp_rec_created = False
+
+        # Compute pocket center from receptor PDB
+        pocket_coords = []
+        with open(pocket_path, "r") as f:
+            for line in f:
+                if line.startswith(("ATOM  ", "HETATM")):
+                    try:
+                        pocket_coords.append([
+                            float(line[30:38]),
+                            float(line[38:46]),
+                            float(line[46:54]),
+                        ])
+                    except ValueError:
+                        pass
+        if pocket_coords:
+            pocket_center = [
+                sum(c[0] for c in pocket_coords) / len(pocket_coords),
+                sum(c[1] for c in pocket_coords) / len(pocket_coords),
+                sum(c[2] for c in pocket_coords) / len(pocket_coords),
+            ]
+        else:
+            pocket_center = [0.0, 0.0, 0.0]
+
+        # In-situ generated pose preservation (do not shift ligand into protein core)
+        from rdkit.Geometry import Point3D
+        from rdkit import Chem as _Chem
+
+        mol_to_dock = _Chem.RWMol(mol)
+        if mol_to_dock.GetNumConformers() > 0:
+            conf = mol_to_dock.GetConformer()
+            lig_coords = [conf.GetAtomPosition(i) for i in range(mol_to_dock.GetNumAtoms())]
+            lig_cx = sum(p.x for p in lig_coords) / len(lig_coords)
+            lig_cy = sum(p.y for p in lig_coords) / len(lig_coords)
+            lig_cz = sum(p.z for p in lig_coords) / len(lig_coords)
+            
+            # If ligand is far from pocket center (>35 A), translate to pocket center; otherwise preserve true generated pose
+            dist_to_pocket = ((lig_cx - pocket_center[0])**2 + (lig_cy - pocket_center[1])**2 + (lig_cz - pocket_center[2])**2)**0.5
+            if dist_to_pocket > 35.0:
+                shift_x = pocket_center[0] - lig_cx
+                shift_y = pocket_center[1] - lig_cy
+                shift_z = pocket_center[2] - lig_cz
+                for i in range(mol_to_dock.GetNumAtoms()):
+                    p = conf.GetAtomPosition(i)
+                    conf.SetAtomPosition(i, Point3D(p.x + shift_x, p.y + shift_y, p.z + shift_z))
+                box_center = pocket_center
+            else:
+                box_center = [lig_cx, lig_cy, lig_cz]
+        else:
+            box_center = pocket_center
+
+        ligand_pdbqt = _mol_to_pdbqt_string(mol_to_dock)
+        if ligand_pdbqt is None:
+            return None
+
+        if center is None:
+            center = box_center
+
+        v = Vina(sf_name='vina', verbosity=0)
+        v.set_receptor(rec_path_to_use)
+        v.set_ligand_from_string(ligand_pdbqt)
+        v.compute_vina_maps(center=center, box_size=box_size)
+        energy_opt = v.optimize()
+        energy = float(energy_opt[0]) if hasattr(energy_opt, '__getitem__') else float(energy_opt)
+
+        # If initial pose is unrelaxed (energy > -1.0 kcal/mol), run SOTA local search to find binding pose
+        if energy > -1.0:
+            try:
+                v.dock(exhaustiveness=4, n_poses=1)
+                dock_energy = float(v.energies(n_poses=1)[0][0])
+                if dock_energy < energy:
+                    energy = dock_energy
+            except Exception:
+                pass
+
+        if temp_rec_created and os.path.exists(rec_path_to_use):
+            os.remove(rec_path_to_use)
+
+        return energy
+
+    except Exception as e:
+        logger.info(f"compute_raw_vina_energy error: {e}")
+        return None
 
 
 class RewardOracle:
+
     """Pharma-grade multi-objective reward computation for DDPO RL fine-tuning.
 
     Parameters
@@ -68,26 +304,26 @@ class RewardOracle:
     min_carbon_ratio : minimum fraction of atoms that must be carbon (≥0.40)
     max_nitrogen_ratio : maximum fraction of atoms that can be nitrogen (≤0.35)
     max_nn_bonds : maximum number of N-N single bonds allowed (≤2)
-    max_sa_score : maximum synthesizability score before penalty (<=5.0 SOTA v2)
-    max_ring_nitrogen : maximum nitrogen atoms allowed in a single ring (<=2)
-    min_mol_weight : minimum molecular weight in Da; below this = zero reward (>=200)
+    max_sa_score : maximum synthesizability score before penalty (≤6.0)
+    max_ring_nitrogen : maximum nitrogen atoms allowed in a single ring (≤2)
     """
 
     def __init__(
         self,
-        w_vina: float = 0.40,
-        w_qed: float = 0.25,
+        w_vina: float = 0.35,    # Primary binding affinity signal
+        w_qed: float = 0.30,     # Boosted: key drug-likeness metric vs SOTA
         w_sa: float = 0.15,
         w_lipinski: float = 0.10,
         w_proxy: float = 0.10,
         contrastive_bonus: float = 0.10,
-        vina_every_n: int = 10,
+        qed_bonus_threshold: float = 0.50,
+        qed_bonus: float = 0.15,
+        vina_every_n: int = 50,   # Vina only every 50 steps — all steps are mult of 10!
         min_carbon_ratio: float = 0.40,
         max_nitrogen_ratio: float = 0.35,
         max_nn_bonds: int = 2,
-        max_sa_score: float = 5.0,         # SOTA v2: tightened from 6.0
+        max_sa_score: float = 6.0,
         max_ring_nitrogen: int = 2,
-        min_mol_weight: float = 200.0,      # SOTA v2: reject too-small molecules
     ):
         self.w_vina = w_vina
         self.w_qed = w_qed
@@ -95,13 +331,14 @@ class RewardOracle:
         self.w_lipinski = w_lipinski
         self.w_proxy = w_proxy
         self.contrastive_bonus = contrastive_bonus
+        self.qed_bonus_threshold = qed_bonus_threshold
+        self.qed_bonus = qed_bonus
         self.vina_every_n = vina_every_n
         self.min_carbon_ratio = min_carbon_ratio
         self.max_nitrogen_ratio = max_nitrogen_ratio
         self.max_nn_bonds = max_nn_bonds
         self.max_sa_score = max_sa_score
         self.max_ring_nitrogen = max_ring_nitrogen
-        self.min_mol_weight = min_mol_weight
         self.max_carbon_ratio = 0.85   # >85% carbon = carbon collapse penalty
         self.min_heteroatoms = 1       # must have ≥1 N or O atom
 
@@ -201,6 +438,7 @@ class RewardOracle:
         except Exception:
             return 0.0
 
+
     @staticmethod
     def compute_vina_score(
         mol,
@@ -234,37 +472,60 @@ class RewardOracle:
                 os.close(old_stderr_fd)
 
         def _mol_to_pdbqt_string(rdkit_mol):
-            """Convert an RDKit mol to PDBQT string, handling all meeko API versions."""
-            from meeko import MoleculePreparation
-            prep = MoleculePreparation()
-            result = prep.prepare(rdkit_mol)
-            # meeko < 0.5: prepare() returns None; call write_pdbqt_string() on prep
-            if result is None:
-                return prep.write_pdbqt_string()
-            # meeko 0.5.x: returns list; each item has write_pdbqt_string()
-            if isinstance(result, list) and result:
-                item = result[0]
-                if hasattr(item, 'write_pdbqt_string'):
-                    return item.write_pdbqt_string()
-                # meeko 0.6+: item is MoleculeSetup; need PDBQTWriterLegacy
+            from rdkit import Chem
+            # Tier 1: Try Meeko (0.7.1 API)
+            try:
+                from meeko import MoleculePreparation, PDBQTWriterLegacy
+                m = Chem.Mol(rdkit_mol)
                 try:
-                    from meeko import PDBQTWriterLegacy
-                    pdbqt_str, is_ok, err = PDBQTWriterLegacy.write_string(item)
-                    if is_ok:
-                        return pdbqt_str
-                except (ImportError, Exception):
+                    Chem.SanitizeMol(m)
+                except Exception:
                     pass
-            raise RuntimeError("Could not write PDBQT with any known meeko API")
+                prep = MoleculePreparation()
+                res = prep.prepare(m)
+                if res is not None:
+                    item = res[0] if (isinstance(res, list) and res) else res
+                    try:
+                        pdbqt_str, is_ok, err = PDBQTWriterLegacy.write_string(item)
+                        if pdbqt_str and len(pdbqt_str) > 20:
+                            return pdbqt_str
+                    except Exception:
+                        pass
+                    if hasattr(prep, 'write_pdbqt_string'):
+                        s = prep.write_pdbqt_string()
+                        if s and len(s) > 20:
+                            return s
+            except Exception:
+                pass
+
+            # Tier 2: Strict fixed-width PDBQT fallback (guarantees zero Vina C++ parse crash)
+            try:
+                if rdkit_mol.GetNumConformers() == 0:
+                    return None
+                conf = rdkit_mol.GetConformer()
+                lines = ["REMARK  Fallback PDBQT"]
+                for a in rdkit_mol.GetAtoms():
+                    idx = a.GetIdx() + 1
+                    sym = a.GetSymbol()
+                    pos = conf.GetAtomPosition(a.GetIdx())
+                    ad_type = "A" if (sym == "C" and a.GetIsAromatic()) else sym
+                    lines.append(
+                        f"ATOM  {idx:>5d} {sym:<4s} LIG A   1    "
+                        f"{pos.x:8.3f}{pos.y:8.3f}{pos.z:8.3f}  1.00  0.00    +0.000 {ad_type:>2s}"
+                    )
+                lines.append("TORSDOF 0")
+                return "\n".join(lines) + "\n"
+            except Exception:
+                return None
 
         try:
             from vina import Vina
             from rdkit import Chem
             from pathlib import Path
 
-            # ── 1. Prepare ligand PDBQT ──
-            with _suppress_c_stderr():
-                mol_h = Chem.AddHs(mol, addCoords=True)
-                ligand_pdbqt = _mol_to_pdbqt_string(mol_h)
+            ligand_pdbqt = _mol_to_pdbqt_string(mol)
+            if ligand_pdbqt is None:
+                return 0.0
 
             # ── 2. Prepare receptor PDBQT ──
             pocket_path_obj = Path(pocket_path)
@@ -298,21 +559,15 @@ class RewardOracle:
                     os.close(fd)
                     path_to_parse = temp_pdb
 
-                # Convert PDB receptor → PDBQT via meeko
-                with _suppress_c_stderr():
-                    receptor_mol = Chem.MolFromPDBFile(path_to_parse, sanitize=False)
+                # Convert PDB receptor → PDBQT via robust parser
+                try:
+                    rec_string = _pdb_to_pdbqt_receptor(path_to_parse)
+                except Exception as rec_err:
+                    logger.debug(f"Receptor PDBQT conversion failed: {rec_err}")
+                    return 0.0
 
                 if pocket_pos_updated is not None and os.path.exists(path_to_parse):
                     os.remove(path_to_parse)
-
-                if receptor_mol is None:
-                    return 0.0
-
-                try:
-                    with _suppress_c_stderr():
-                        rec_string = _mol_to_pdbqt_string(receptor_mol)
-                except Exception:
-                    return 0.0
 
                 fd, temp_rec_path = tempfile.mkstemp(suffix='.pdbqt')
                 os.write(fd, rec_string.encode('utf-8'))
@@ -349,8 +604,7 @@ class RewardOracle:
             if temp_rec_created and os.path.exists(rec_path_to_use):
                 os.remove(rec_path_to_use)
 
-            # ── 5. Normalise: r_vina ∈ [0, 1] ──
-            # -13 kcal/mol → 1.0,  -6 kcal/mol → 0.0
+            # ── 5. Return raw energy (negative kcal/mol) and normalized r_vina ──
             r_vina = (abs(energy) - 6.0) / 7.0
             return max(0.0, min(1.0, r_vina))
 
@@ -358,12 +612,25 @@ class RewardOracle:
             logger.debug(f"Vina scoring skipped (using proxy fallback): {e}")
             return 0.0
 
+    @staticmethod
+    def compute_raw_vina_energy(
+        mol,
+        pocket_path: str,
+        pocket_pos_updated: torch.Tensor = None,
+        center: tuple = None,
+        box_size: tuple = (20.0, 20.0, 20.0),
+    ) -> float | None:
+        """Run AutoDock Vina and return raw binding energy in kcal/mol (e.g., -7.8 kcal/mol)."""
+        return compute_raw_vina_energy_fn(mol, pocket_path, pocket_pos_updated, center, box_size)
+
     def compute_proxy_reward(self, pK_pred: torch.Tensor) -> float:
         """Convert the learned affinity proxy to a reward.
 
-        r_proxy = sigmoid(pK_pred / 16) — aligned to Vina during pretraining.
+        r_proxy = sigmoid((pK_pred + 8) / 4) — shifted so that pK_pred=-8 kcal/mol
+        gives r=0.5 and every kcal/mol improvement adds meaningful gradient.
+        Previously pK_pred/16 gave sigmoid(-2.9/16)=0.455 for any pK, nearly flat.
         """
-        return torch.sigmoid(pK_pred / 16.0).item()
+        return torch.sigmoid((pK_pred + 8.0) / 4.0).item()
 
     # ──────────────────────────────────────────────────────────────────
     # Pharma-Grade Safety Gates
@@ -423,6 +690,43 @@ class RewardOracle:
             return count
         except Exception:
             return 999
+
+    @staticmethod
+    def check_ring_sizes(mol) -> float:
+        """Evaluate ring size distribution for medicinal drug-likeness.
+
+        Pharma standard: 5- and 6-membered aromatic and saturated rings.
+        Heavily penalizes strained 3- and 4-membered fused cages (aziridines, cyclopropanes, diazirines)
+        that cause high SA scores and impossible 3D crystal relaxation.
+
+        Returns ring_size_score in [0.10, 1.0].
+        """
+        try:
+            ri = mol.GetRingInfo()
+            rings = ri.AtomRings()
+            if not rings:
+                return 0.85  # acyclic linkers are acceptable
+            
+            strained_34 = 0
+            good_56 = 0
+            for ring in rings:
+                sz = len(ring)
+                if sz in (3, 4):
+                    strained_34 += 1
+                elif sz in (5, 6):
+                    good_56 += 1
+                elif sz >= 7:
+                    strained_34 += 0.5  # macrocycles penalized slightly
+
+            if strained_34 == 0 and good_56 >= 1:
+                return 1.0  # Perfect drug scaffold (e.g. benzene, pyridine, piperidine)
+            elif strained_34 == 0 and good_56 == 0:
+                return 0.85
+            else:
+                # Strong penalty for each 3- or 4-membered strained ring
+                return max(0.10, 1.0 - 0.40 * strained_34)
+        except Exception:
+            return 0.50
 
     def check_ring_quality(self, mol) -> tuple:
         """Check that no single ring has more than max_ring_nitrogen N atoms.
@@ -502,13 +806,7 @@ class RewardOracle:
         except Exception:
             return False, -0.5, "failed RDKit SanitizeMol"
 
-        # Gate 0: Molecular weight (SOTA v2) — reject too-small molecules
-        from rdkit.Chem.Descriptors import MolWt
-        mw = MolWt(mol)
-        if mw < self.min_mol_weight:
-            return False, -0.3, f"MW too small ({mw:.0f} < {self.min_mol_weight:.0f} Da)"
-
-        # Gate 1 (was Gate 2): Carbon ratio
+        # Gate 2: Carbon ratio
         carbon_score = self.compute_element_diversity(mol)
         if carbon_score < 0.5:
             return False, -0.3, f"carbon ratio too low ({carbon_score:.2f})"
@@ -682,45 +980,81 @@ class RewardOracle:
         n_heteroatoms = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() in (7, 8, 9, 16, 17))
         carbon_ratio = n_carbon / max(n_total, 1)
 
-        # Hard gate: require at least 1 N or O atom — prevents pure-carbon collapse
-        if n_heteroatoms < self.min_heteroatoms:
-            return {
-                "total_reward": 0.0,
-                "r_qed": 0.0, "r_sa": 0.0, "r_lipinski": 0.0,
-                "r_proxy": 0.0, "r_diversity": 0.0,
-                "gate_reason": "no_heteroatoms",
-            }
-
-        # Bell-shaped carbon score: peaks at [min_carbon, max_carbon], decays outside
-        if carbon_ratio < self.min_carbon_ratio:
-            carbon_score = max(0.0, carbon_ratio / self.min_carbon_ratio)
-        elif carbon_ratio <= self.max_carbon_ratio:
-            carbon_score = 1.0  # optimal range
-        else:
-            # Decay from 1.0 at max_carbon_ratio to 0.0 at 100% carbon
-            carbon_score = max(0.0, 1.0 - (carbon_ratio - self.max_carbon_ratio) / (1.0 - self.max_carbon_ratio))
-
-        # ── Soft nitrogen ratio penalty (continuous) ──
+        # ── Comprehensive Pharma Stoichiometry Scoring ──
+        # Standard small-molecule drugs: 60-80% Carbon, 8-30% Nitrogen (≥1 N), 5-25% Oxygen (≥1 O)
         n_nitrogen = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() == 7)
         nitrogen_ratio = n_nitrogen / max(n_total, 1)
-        # Smooth: 1.0 at 0% nitrogen, 0.0 at 70%+ nitrogen
-        nitrogen_score = max(0.0, 1.0 - nitrogen_ratio / 0.70)
+        n_oxygen = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() == 8)
+        oxygen_ratio = n_oxygen / max(n_total, 1)
+
+        # 1. Carbon score: optimal 55% - 85%
+        if 0.55 <= carbon_ratio <= 0.85:
+            carbon_score = 1.0
+        elif carbon_ratio < 0.55:
+            carbon_score = max(0.15, carbon_ratio / 0.55)
+        else:
+            carbon_score = max(0.15, 1.0 - (carbon_ratio - 0.85) / 0.15)
+
+        # 2. Nitrogen score: optimal 8% - 30%, requires at least 1-2 N atoms
+        if n_nitrogen >= 1 and 0.05 <= nitrogen_ratio <= 0.35:
+            nitrogen_presence = 1.0
+        elif n_nitrogen == 0:
+            nitrogen_presence = 0.20  # Strong gradient forcing model to incorporate Nitrogen
+        else:
+            nitrogen_presence = max(0.15, 1.0 - (nitrogen_ratio - 0.35) / 0.20)
+
+        # 3. Oxygen score: optimal 5% - 25%, requires at least 1-2 O atoms
+        if n_oxygen >= 1 and 0.05 <= oxygen_ratio <= 0.30:
+            oxygen_presence = 1.0
+        elif n_oxygen == 0:
+            oxygen_presence = 0.20  # Strong gradient forcing model to incorporate Oxygen
+        else:
+            oxygen_presence = max(0.15, 1.0 - (oxygen_ratio - 0.30) / 0.20)
 
         # ── Soft N-N bond penalty ──
         nn_count = self.count_nn_bonds(mol)
-        nn_score = max(0.0, 1.0 - nn_count / 5.0)  # smooth decay
+        nn_score = max(0.0, 1.0 - nn_count / 3.0)
 
         # ── Soft ring quality penalty ──
         ring_passed, ring_worst, _ = self.check_ring_quality(mol)
-        ring_score = max(0.0, 1.0 - max(0, ring_worst - 1) / 4.0)
+        ring_score = max(0.0, 1.0 - max(0, ring_worst - 1) / 3.0)
 
-        # ── Soft SA penalty ──
+        # ── Ring size quality (rewards 5- and 6-membered rings, penalizes 3- and 4-membered strained cages) ──
+        ring_size_score = self.check_ring_sizes(mol)
+
+        # ── Strict SA Synthesizability curve (optimal: SA <= 4.0) ──
         sa_raw = self.compute_sa_raw(mol)
-        sa_score = max(0.0, 1.0 - max(0, sa_raw - 3.0) / 7.0)
+        if sa_raw <= 4.0:
+            sa_score = 1.0
+        elif sa_raw <= 6.0:
+            sa_score = max(0.20, 1.0 - (sa_raw - 4.0) / 2.5)
+        else:
+            sa_score = max(0.05, 0.20 - (sa_raw - 6.0) / 4.0)
 
-        # ── Combined chemistry quality multiplier ──
-        # All scores in [0, 1]; product heavily penalizes bad chemistry
-        chem_quality = carbon_score * nitrogen_score * nn_score * ring_score * sa_score
+        # ── Physical 3D Conformation / PoseBusters Sanity Check ──
+        # Directly checks for realistic 3D bond lengths, angles, and steric sanity via MMFF
+        pb_score = 0.5  # default baseline
+        try:
+            from rdkit.Chem import AllChem
+            mol_h = Chem.AddHs(mol, addCoords=True)
+            if mol_h.GetNumConformers() > 0:
+                res = AllChem.MMFFOptimizeMolecule(mol_h, maxIters=300)
+                pb_score = 1.0 if (res in (0, 1)) else 0.3
+        except Exception:
+            pb_score = 0.2
+
+        # ── Combined chemistry quality: Multiplicative Carbon Gate × Multi-Objective Balance ──
+        # Real pharma drugs (60-80% C, 2+ N, 2+ O, 5/6-membered rings, SA < 4.0, valid 3D physical pose) receive 1.0.
+        hetero_balance = 0.50 * nitrogen_presence + 0.50 * oxygen_presence
+        inner_quality = (
+            0.25 * hetero_balance     # Balanced N + O incorporation
+            + 0.25 * ring_size_score  # 5- and 6-membered aromatic/aliphatic drug rings (penalizes 3/4-member cages)
+            + 0.25 * sa_score         # Strict Synthesizability (SA < 4.0)
+            + 0.15 * pb_score         # PoseBusters 3D physical conformation & bond length sanity
+            + 0.05 * nn_score         # Anti-hydrazine
+            + 0.05 * ring_score       # Anti-tetrazole
+        )
+        chem_quality = carbon_score * inner_quality
 
         # ── Weighted reward (same formula as compute_reward) ──
         # Use Vina physics oracle when available, else fall back to proxy
@@ -736,6 +1070,10 @@ class RewardOracle:
             + self.w_lipinski * r_lipinski
             + self.w_proxy * r_proxy
         )
+
+        # High QED bonus: +0.15 if QED > 0.50 (pushes toward SOTA drug-likeness range)
+        if r_qed >= self.qed_bonus_threshold:
+            base_reward += self.qed_bonus
 
         # Scale by chemistry quality (0 to 1 multiplier)
         total = base_reward * chem_quality

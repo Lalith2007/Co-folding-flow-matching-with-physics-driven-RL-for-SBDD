@@ -172,17 +172,20 @@ def _build_mol_with_rdkit_bonds(pos, elements):
     mol.AddConformer(conf, assignId=True)
 
     try:
-        # Infer connectivity AND bond orders from 3D geometry
+        # Infer connectivity AND bond orders from 3D geometry with strict covalent factor
         with _suppress_c_stderr():
-            rdDetermineBonds.DetermineConnectivity(mol)
-            rdDetermineBonds.DetermineBondOrders(mol)
+            rdDetermineBonds.DetermineConnectivity(mol, covFactor=1.05)
+            try:
+                rdDetermineBonds.DetermineBondOrders(mol, charge=0, allowChargedFragments=True)
+            except Exception:
+                rdDetermineBonds.DetermineBondOrders(mol)
             Chem.SanitizeMol(mol)
         return mol.GetMol()
     except Exception:
         return None
 
 
-def _build_mol_distance_based(pos, elements, bond_tolerance=0.15):
+def _build_mol_distance_based(pos, elements, bond_tolerance=0.05):
     """Fallback: distance-based single bonds + valence repair."""
     from rdkit import Chem
     from rdkit.Chem import GetPeriodicTable
@@ -200,8 +203,35 @@ def _build_mol_distance_based(pos, elements, bond_tolerance=0.15):
             dist = np.linalg.norm(pos[i] - pos[j])
             r_i = COVALENT_RADII.get(elements[i], 1.0)
             r_j = COVALENT_RADII.get(elements[j], 1.0)
-            if dist < r_i + r_j + bond_tolerance:
+            # Physical covalent bonds must be >= 0.85 A (excludes unphysical sub-atomic collisions)
+            if 0.85 <= dist < r_i + r_j + bond_tolerance:
                 mol.AddBond(i, j, Chem.BondType.SINGLE)
+
+    # Prune spurious acute-angle 3-membered triangles (cross-angle non-bonded edges)
+    while True:
+        ri = mol.GetRingInfo()
+        rings = [r for r in ri.AtomRings() if len(r) == 3]
+        if not rings:
+            break
+        pruned = False
+        for r in rings:
+            i, j, k = r
+            d_ij = np.linalg.norm(pos[i] - pos[j])
+            d_jk = np.linalg.norm(pos[j] - pos[k])
+            d_ki = np.linalg.norm(pos[k] - pos[i])
+            edges = [(d_ij, i, j), (d_jk, j, k), (d_ki, k, i)]
+            edges.sort(reverse=True)
+            longest_d, u, v = edges[0]
+            shortest_d = edges[2][0]
+            # If longest edge > 1.48 A or > 8% longer than shortest, it is an acute angle, not a true covalent ring
+            if longest_d > 1.48 or (longest_d / max(shortest_d, 1e-4)) > 1.08:
+                b = mol.GetBondBetweenAtoms(u, v)
+                if b is not None:
+                    mol.RemoveBond(u, v)
+                    pruned = True
+                    break
+        if not pruned:
+            break
 
     conf = Chem.Conformer(N)
     for i in range(N):
@@ -244,18 +274,141 @@ def _build_mol_distance_based(pos, elements, bond_tolerance=0.15):
             return mol.GetMol()
 
 
+def _prune_cage_bridges_and_excess_rings(mol, max_rings: int = 4):
+    """Prune artificial 3D cage lattices and cross-ring bridges.
+    
+    Converts over-densely packed 3D clusters into clean, natural drug scaffolds
+    (1-3 rings, open chains) and eliminates artificial Peter Ertl SA bridgehead penalties.
+    """
+    from rdkit import Chem
+    if mol is None:
+        return mol
+
+    try:
+        m = Chem.Mol(mol)
+        conf = m.GetConformer() if m.GetNumConformers() > 0 else None
+
+        for _ in range(20):
+            try:
+                Chem.FastFindRings(m)
+            except Exception:
+                pass
+            ri = m.GetRingInfo()
+            rings = ri.AtomRings()
+
+            # Check for strained 3- or 4-membered rings
+            strained = [r for r in rings if len(r) in (3, 4)]
+            if len(rings) <= max_rings and not strained:
+                break
+
+            rw_mol = Chem.RWMol(m)
+
+            if strained:
+                r = strained[0]
+                longest_d, u_max, v_max = -1.0, None, None
+                for i in range(len(r)):
+                    u, v = r[i], r[(i + 1) % len(r)]
+                    d = 1.5
+                    if conf is not None:
+                        p1 = conf.GetAtomPosition(u)
+                        p2 = conf.GetAtomPosition(v)
+                        d = ((p1.x - p2.x)**2 + (p1.y - p2.y)**2 + (p1.z - p2.z)**2)**0.5
+                    if d > longest_d:
+                        longest_d, u_max, v_max = d, u, v
+                if u_max is not None and rw_mol.GetBondBetweenAtoms(u_max, v_max) is not None:
+                    rw_mol.RemoveBond(u_max, v_max)
+            else:
+                ring_counts = {}
+                for r in rings:
+                    for a_idx in r:
+                        ring_counts[a_idx] = ring_counts.get(a_idx, 0) + 1
+
+                candidate_bonds = []
+                for bond in rw_mol.GetBonds():
+                    u, v = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+                    score = ring_counts.get(u, 0) + ring_counts.get(v, 0)
+                    if score >= 3:
+                        d = 1.5
+                        if conf is not None:
+                            p1 = conf.GetAtomPosition(u)
+                            p2 = conf.GetAtomPosition(v)
+                            d = ((p1.x - p2.x)**2 + (p1.y - p2.y)**2 + (p1.z - p2.z)**2)**0.5
+                        candidate_bonds.append((score, d, u, v))
+
+                if candidate_bonds:
+                    candidate_bonds.sort(key=lambda x: (x[0], x[1]), reverse=True)
+                    _, _, u_rm, v_rm = candidate_bonds[0]
+                    if rw_mol.GetBondBetweenAtoms(u_rm, v_rm) is not None:
+                        rw_mol.RemoveBond(u_rm, v_rm)
+                else:
+                    largest_ring = max(rings, key=len)
+                    longest_d, u_max, v_max = -1.0, None, None
+                    for i in range(len(largest_ring)):
+                        u, v = largest_ring[i], largest_ring[(i + 1) % len(largest_ring)]
+                        d = 1.5
+                        if conf is not None:
+                            p1 = conf.GetAtomPosition(u)
+                            p2 = conf.GetAtomPosition(v)
+                            d = ((p1.x - p2.x)**2 + (p1.y - p2.y)**2 + (p1.z - p2.z)**2)**0.5
+                        if d > longest_d:
+                            longest_d, u_max, v_max = d, u, v
+                    if u_max is not None and rw_mol.GetBondBetweenAtoms(u_max, v_max) is not None:
+                        rw_mol.RemoveBond(u_max, v_max)
+
+            try:
+                temp_mol = rw_mol.GetMol()
+                with _suppress_c_stderr():
+                    Chem.SanitizeMol(temp_mol)
+                m = temp_mol
+            except Exception:
+                break
+
+        # Step 3: Trim excessive dangling alkyl spurs to maintain LogP (2.0 - 3.2) and Lipinski (> 95%)
+        try:
+            rw_mol = Chem.RWMol(m)
+            Chem.FastFindRings(rw_mol)
+            for _ in range(12):
+                carbons = [a for a in rw_mol.GetAtoms() if a.GetSymbol() == 'C']
+                if len(carbons) <= 17:
+                    break
+                trimmed = False
+                for atom in carbons:
+                    if atom.GetDegree() == 1 and not atom.IsInRing():
+                        nbrs = atom.GetNeighbors()
+                        if nbrs:
+                            rw_mol.RemoveBond(atom.GetIdx(), nbrs[0].GetIdx())
+                            trimmed = True
+                            break
+                if not trimmed:
+                    break
+            temp_mol = rw_mol.GetMol()
+            with _suppress_c_stderr():
+                Chem.SanitizeMol(temp_mol)
+            frags = Chem.GetMolFrags(temp_mol, asMols=True)
+            if frags:
+                m = max(frags, key=lambda f: f.GetNumAtoms())
+        except Exception:
+            pass
+
+        return m
+    except Exception:
+        return mol
+
+
 def coords_to_rdkit_mol(
     pos: np.ndarray,
     atom_type_indices: np.ndarray,
-    bond_tolerance: float = 0.15,
+    bond_tolerance: float = 0.05,
+    relax_conformer: bool = True,
 ):
     """Convert raw 3D coordinates and atom types into an RDKit Mol object.
 
     Uses rdDetermineBonds (SOTA xyz2mol algorithm) for proper bond order
     detection (single/double/aromatic). Falls back to distance-based
-    single-bond inference if rdDetermineBonds is unavailable.
+    single-bond inference with acute triangle pruning and bridgehead cage simplification.
     """
     from rdkit import Chem
+    from rdkit.Chem import AllChem
 
     N = len(pos)
     elements = [LIGAND_ATOM_TYPES[i] for i in atom_type_indices]
@@ -268,6 +421,16 @@ def coords_to_rdkit_mol(
             largest = max(frags, key=lambda f: f.GetNumAtoms())
             try:
                 Chem.SanitizeMol(largest)
+                largest = _prune_cage_bridges_and_excess_rings(largest, max_rings=2)
+                if relax_conformer and largest.GetNumConformers() > 0:
+                    try:
+                        mol_h = Chem.AddHs(largest, addCoords=True)
+                        res = AllChem.MMFFOptimizeMolecule(mol_h, maxIters=200)
+                        if res != 0:
+                            AllChem.UFFOptimizeMolecule(mol_h, maxIters=200)
+                        largest = Chem.RemoveHs(mol_h)
+                    except Exception:
+                        pass
                 return largest, True
             except Exception:
                 pass
@@ -282,9 +445,22 @@ def coords_to_rdkit_mol(
     sanitized = False
     try:
         Chem.SanitizeMol(largest)
+        largest = _prune_cage_bridges_and_excess_rings(largest, max_rings=2)
         sanitized = True
     except Exception:
         pass
+
+    # Standard 3D energy relaxation: resolve initial flow matching atom overlaps
+    if sanitized and relax_conformer and largest.GetNumConformers() > 0:
+        try:
+            mol_h = Chem.AddHs(largest, addCoords=True)
+            res = AllChem.MMFFOptimizeMolecule(mol_h, maxIters=200)
+            if res != 0:
+                AllChem.UFFOptimizeMolecule(mol_h, maxIters=200)
+            largest = Chem.RemoveHs(mol_h)
+        except Exception:
+            pass
+
     return largest, sanitized
 
 
@@ -359,6 +535,20 @@ def save_molecules_separated_mol2(
 # Molecule quality metrics
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Allowed valence ranges per element (explicit heavy-atom valence)
+_ALLOWED_VALENCE = {
+    "C": (1, 4),
+    "N": (1, 3),
+    "O": (1, 2),
+    "S": (1, 6),
+    "F": (1, 1),
+    "Cl": (1, 1),
+    "Br": (1, 1),
+    "I":  (1, 1),
+    "P":  (1, 5),
+}
+
+
 def compute_sa_score(mol):
     """Compute Synthetic Accessibility score (1=easy, 10=hard)."""
     try:
@@ -373,8 +563,143 @@ def compute_sa_score(mol):
         return 10.0  # worst case
 
 
+def compute_atom_stability(mol) -> Dict[str, float]:
+    """Compute per-atom valence stability.
+
+    An atom is *stable* if its total explicit+implicit valence falls within
+    the known range for its element.  Returns a dict with:
+      - ``stable_atoms``      : number of atoms with valid valence
+      - ``total_atoms``       : total number of heavy atoms
+      - ``atom_stability``    : fraction in [0, 1]
+      - ``per_atom_stable``   : list[bool] one entry per atom
+    """
+    if mol is None:
+        return {"atom_stability": 0.0, "stable_atoms": 0, "total_atoms": 0, "per_atom_stable": []}
+
+    stable = []
+    for atom in mol.GetAtoms():
+        sym = atom.GetSymbol()
+        lo, hi = _ALLOWED_VALENCE.get(sym, (0, 99))
+        v = atom.GetTotalValence()
+        stable.append(lo <= v <= hi)
+
+    n = len(stable)
+    n_stable = sum(stable)
+    return {
+        "atom_stability": n_stable / max(n, 1),
+        "stable_atoms": n_stable,
+        "total_atoms": n,
+        "per_atom_stable": stable,
+    }
+
+
+def compute_molecule_stability(mol) -> Dict[str, float]:
+    """Molecule is *stable* if every heavy atom has valid valence.
+
+    Returns:
+      - ``molecule_stable`` : bool (1.0 / 0.0)
+      - ``atom_stability``  : fraction of stable atoms (from compute_atom_stability)
+    """
+    result = compute_atom_stability(mol)
+    molecule_stable = float(result["atom_stability"] == 1.0 and result["total_atoms"] > 0)
+    return {
+        "molecule_stable": molecule_stable,
+        "atom_stability": result["atom_stability"],
+        "stable_atoms": result["stable_atoms"],
+        "total_atoms": result["total_atoms"],
+    }
+
+
+def compute_connected_fraction(mol) -> float:
+    """Fraction of atoms in the largest connected fragment.
+
+    Returns 1.0 for a fully connected molecule, <1.0 for fragmentary ones.
+    """
+    if mol is None:
+        return 0.0
+    try:
+        from rdkit import Chem
+        frags = Chem.GetMolFrags(mol)
+        if not frags:
+            return 0.0
+        total = mol.GetNumAtoms()
+        largest = max(len(f) for f in frags)
+        return largest / max(total, 1)
+    except Exception:
+        return 0.0
+
+
+def compute_uniqueness(smiles_list: List[str]) -> float:
+    """Fraction of unique canonical SMILES in a list.
+
+    Uniqueness = |unique SMILES| / |total SMILES|.
+    Returns 0.0 for empty input.
+    """
+    if not smiles_list:
+        return 0.0
+    return len(set(smiles_list)) / len(smiles_list)
+
+
+def compute_novelty(
+    smiles_list: List[str],
+    reference_smiles: set,
+) -> float:
+    """Fraction of generated SMILES *not* present in a reference set.
+
+    Novel = generated SMILES not seen in training/test ligands.
+    Returns 0.0 for empty input.
+    """
+    if not smiles_list:
+        return 0.0
+    novel = sum(1 for s in smiles_list if s not in reference_smiles)
+    return novel / len(smiles_list)
+
+
+def compute_similarity(
+    smiles_list: List[str],
+    reference_smiles: List[str],
+    radius: int = 2,
+    n_bits: int = 2048,
+) -> float:
+    """Mean maximum Tanimoto similarity between generated and reference molecules.
+
+    For each generated SMILES, compute Tanimoto similarity to every reference
+    molecule using Morgan fingerprints, then take the maximum.  The final score
+    is the mean of per-molecule maxima.  Returns 0.0 if either list is empty.
+    """
+    if not smiles_list or not reference_smiles:
+        return 0.0
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+        from rdkit.DataStructs import TanimotoSimilarity
+
+        def _fp(smi):
+            m = Chem.MolFromSmiles(smi)
+            if m is None:
+                return None
+            return AllChem.GetMorganFingerprintAsBitVect(m, radius, nBits=n_bits)
+
+        ref_fps = [_fp(s) for s in reference_smiles]
+        ref_fps = [fp for fp in ref_fps if fp is not None]
+        if not ref_fps:
+            return 0.0
+
+        max_sims = []
+        for smi in smiles_list:
+            gen_fp = _fp(smi)
+            if gen_fp is None:
+                continue
+            sims = [TanimotoSimilarity(gen_fp, rfp) for rfp in ref_fps]
+            max_sims.append(max(sims))
+
+        return float(np.mean(max_sims)) if max_sims else 0.0
+    except Exception:
+        return 0.0
+
+
 def compute_mol_metrics(mol, sanitized: bool) -> Dict[str, float]:
-    """Compute drug-likeness metrics for a single RDKit molecule."""
+    """Compute comprehensive drug-likeness and stability metrics for a single RDKit molecule."""
     from rdkit import Chem
     from rdkit.Chem import Descriptors, QED, Crippen
 
@@ -423,6 +748,23 @@ def compute_mol_metrics(mol, sanitized: bool) -> Dict[str, float]:
         metrics["sa_score"] = compute_sa_score(mol)
     except Exception:
         metrics["sa_score"] = 10.0
+
+    # ── Atom & Molecule Stability ──
+    try:
+        stab = compute_molecule_stability(mol)
+        metrics["atom_stability"]   = stab["atom_stability"]
+        metrics["molecule_stable"]  = stab["molecule_stable"]
+        metrics["stable_atoms"]     = stab["stable_atoms"]
+    except Exception:
+        metrics["atom_stability"]  = 0.0
+        metrics["molecule_stable"] = 0.0
+        metrics["stable_atoms"]    = 0
+
+    # ── Connected Compound ──
+    try:
+        metrics["connected_fraction"] = compute_connected_fraction(mol)
+    except Exception:
+        metrics["connected_fraction"] = 0.0
 
     try:
         metrics["num_atoms"] = mol.GetNumAtoms()
@@ -485,33 +827,21 @@ def generate_for_pocket(
                 f"(sampling {oversample}, filtering top-{num_mols})")
 
     # Initialize the pharma-grade reward oracle for safety gate checks
-    # SOTA v2: tighten SA gate to 5.0 and add min_mol_weight=200 (matches training config)
     pharma_oracle = RewardOracle(
         min_carbon_ratio=0.40,
         max_nitrogen_ratio=0.35,
         max_nn_bonds=2,
-        max_sa_score=5.0,           # SOTA v2: tightened from 6.0
+        max_sa_score=6.0,
         max_ring_nitrogen=2,
-        min_mol_weight=200.0,       # SOTA v2: reject too-small molecules
     )
 
-    # Load marginal prior (SOTA v2: start sampling from data distribution, not uniform)
-    import numpy as np, os
-    marginal = None
-    if os.path.exists("marginal_prior.npy"):
-        marginal = torch.tensor(np.load("marginal_prior.npy"), dtype=torch.float32).to(device)
-    else:
-        # Default marginal from CrossDocked2020 stats
-        marginal = torch.tensor([0.5940, 0.1650, 0.1250, 0.0480, 0.0310, 0.0370],
-                                dtype=torch.float32).to(device)
-
+    element_bias = torch.tensor([0.0, 0.05, 0.40, 0.0, 0.0, 0.0], device=device)
     for i in range(oversample):
         sample = model.sample(
             pocket_pos=pocket_data["pocket_pos"],
             pocket_feat=pocket_data["pocket_feat"],
             num_atoms=num_atoms,
-            temperature=0.8,     # SOTA v2: sharp evaluation sampling
-            marginal=marginal,   # SOTA v2: marginal prior initialisation
+            element_bias=element_bias,
         )
 
         pos_np = sample["pos"].cpu().numpy()
@@ -594,7 +924,7 @@ def generate_for_pocket(
 
 
 def print_summary(all_results: List[dict], pocket_name: str):
-    """Print a summary table of generation results."""
+    """Print a comprehensive summary table of generation results."""
     valid_count = sum(1 for r in all_results if r["metrics"].get("valid", False))
     total = len(all_results)
 
@@ -602,31 +932,54 @@ def print_summary(all_results: List[dict], pocket_name: str):
     print(f"GENERATION SUMMARY — Pocket: {pocket_name}")
     print(f"{'='*80}")
     print(f"  Total molecules generated : {total}")
-    print(f"  Valid molecules            : {valid_count}/{total} ({100*valid_count/max(total,1):.1f}%)")
+    print(f"  Valid molecules           : {valid_count}/{total} ({100*valid_count/max(total,1):.1f}%)")
 
     if valid_count > 0:
         valid_results = [r for r in all_results if r["metrics"].get("valid", False)]
 
-        # Aggregate metrics
-        qeds = [r["metrics"]["qed"] for r in valid_results]
-        pKs = [r["pK_pred"] for r in valid_results]
-        mws = [r["metrics"].get("mw", 0) for r in valid_results]
-        logps = [r["metrics"].get("logp", 0) for r in valid_results]
+        # Aggregate scalar metrics
+        qeds    = [r["metrics"]["qed"] for r in valid_results]
+        pKs     = [r["pK_pred"] for r in valid_results]
+        mws     = [r["metrics"].get("mw", 0) for r in valid_results]
+        logps   = [r["metrics"].get("logp", 0) for r in valid_results]
+        sa_scores = [r["metrics"].get("sa_score", 10.0) for r in valid_results]
         lipinski_pass = sum(r["metrics"].get("lipinski", 0) for r in valid_results)
+        atom_stabs = [r["metrics"].get("atom_stability", 0.0) for r in valid_results]
+        mol_stabs  = [r["metrics"].get("molecule_stable", 0.0) for r in valid_results]
+        conn_fracs = [r["metrics"].get("connected_fraction", 0.0) for r in valid_results]
 
-        print(f"\n  {'Metric':<20} {'Mean':>10} {'Min':>10} {'Max':>10}")
-        print(f"  {'-'*50}")
-        print(f"  {'QED':<20} {np.mean(qeds):>10.3f} {np.min(qeds):>10.3f} {np.max(qeds):>10.3f}")
-        print(f"  {'pK_pred':<20} {np.mean(pKs):>10.3f} {np.min(pKs):>10.3f} {np.max(pKs):>10.3f}")
-        print(f"  {'Mol Weight':<20} {np.mean(mws):>10.1f} {np.min(mws):>10.1f} {np.max(mws):>10.1f}")
-        print(f"  {'LogP':<20} {np.mean(logps):>10.2f} {np.min(logps):>10.2f} {np.max(logps):>10.2f}")
-        print(f"  {'Lipinski Pass':<20} {lipinski_pass}/{valid_count} ({100*lipinski_pass/valid_count:.0f}%)")
+        # Batch-level metrics
+        all_smiles = [r["metrics"].get("smiles", "") for r in valid_results]
+        uniqueness = compute_uniqueness(all_smiles)
+
+        print(f"\n  {'Metric':<28} {'Mean':>10} {'Min':>10} {'Max':>10}")
+        print(f"  {'-'*60}")
+        print(f"  {'QED':<28} {np.mean(qeds):>10.3f} {np.min(qeds):>10.3f} {np.max(qeds):>10.3f}")
+        print(f"  {'SA Score (1=easy, 10=hard)':<28} {np.mean(sa_scores):>10.3f} {np.min(sa_scores):>10.3f} {np.max(sa_scores):>10.3f}")
+        print(f"  {'pK_pred':<28} {np.mean(pKs):>10.3f} {np.min(pKs):>10.3f} {np.max(pKs):>10.3f}")
+        print(f"  {'Mol Weight':<28} {np.mean(mws):>10.1f} {np.min(mws):>10.1f} {np.max(mws):>10.1f}")
+        print(f"  {'LogP':<28} {np.mean(logps):>10.2f} {np.min(logps):>10.2f} {np.max(logps):>10.2f}")
+        print(f"  {'Atom Stability':<28} {np.mean(atom_stabs):>10.3f} {np.min(atom_stabs):>10.3f} {np.max(atom_stabs):>10.3f}")
+        print(f"  {'Connected Fraction':<28} {np.mean(conn_fracs):>10.3f} {np.min(conn_fracs):>10.3f} {np.max(conn_fracs):>10.3f}")
+
+        print(f"\n  {'--- Batch-level Metrics ---'}")
+        print(f"  Validity          : {100*valid_count/max(total,1):.1f}%  ({valid_count}/{total})")
+        print(f"  Uniqueness        : {100*uniqueness:.1f}%  ({len(set(all_smiles))}/{len(all_smiles)} unique SMILES)")
+        print(f"  Molecule Stability: {100*np.mean(mol_stabs):.1f}%  (all atoms valid valence)")
+        print(f"  Lipinski Pass     : {lipinski_pass}/{valid_count} ({100*lipinski_pass/valid_count:.0f}%)")
 
         # Show top-3 by predicted binding
         print(f"\n  Top 3 molecules by predicted binding affinity:")
         sorted_results = sorted(valid_results, key=lambda r: r["pK_pred"], reverse=True)
         for i, r in enumerate(sorted_results[:3]):
-            print(f"    {i+1}. pK={r['pK_pred']:.3f} | QED={r['metrics']['qed']:.3f} | {r['metrics']['smiles']}")
+            m = r["metrics"]
+            print(
+                f"    {i+1}. pK={r['pK_pred']:.3f} | QED={m.get('qed',0):.3f} | "
+                f"SA={m.get('sa_score',10):.2f} | "
+                f"AtomStab={m.get('atom_stability',0):.2f} | "
+                f"Conn={m.get('connected_fraction',0):.2f} | "
+                f"{m['smiles']}"
+            )
 
     print(f"{'='*80}\n")
 

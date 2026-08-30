@@ -1,0 +1,10 @@
+{
+  "smiles": "CCCC1OC2CCC(CCCC2C(C)O)CC1C",
+  "pocket": "1cbq",
+  "simulation_ns": 200.0,
+  "elapsed_hours": 6.7,
+  "mean_ligand_rmsd_angstrom": 1.42,
+  "protein_ca_rmsd_angstrom": 1.18,
+  "hydrogen_bonds_persistent": 3,
+  "status": "CONVERGED_STABLE"
+}

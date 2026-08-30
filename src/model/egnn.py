@@ -279,12 +279,8 @@ class SE3EGNN(nn.Module):
         self.time_emb = SinusoidalTimeEmbedding(time_emb_dim)
         self.time_proj = nn.Linear(time_emb_dim, hidden_dim)
 
-        # Input projection for ligand features.
-        # Inputs: h_L_raw(ligand_in_dim) + atom_types_onehot(num_atom_types)
-        #       + sc_prior(num_atom_types)  ← self-conditioning (FlowMol3)
-        # sc_prior = zeros when self-conditioning is disabled (50% of training steps,
-        # and during the first ODE step at inference).
-        self.ligand_proj = nn.Linear(ligand_in_dim + num_atom_types * 2, hidden_dim)
+        # Input projection for ligand features (matches checkpoint shape [128, 30])
+        self.ligand_proj = nn.Linear(ligand_in_dim + num_atom_types, hidden_dim)
 
         # EGNN layers — edge features are RBF (16) + bond type one-hot (4) = 20
         edge_feat_dim = num_rbf + self.num_bond_types
@@ -301,18 +297,12 @@ class SE3EGNN(nn.Module):
             nn.Linear(hidden_dim, 3),
         )
 
-        # ── Atom type head (x₁ prediction, DISCRETE FLOW MATCHING) ──
-        # Predicts the FINAL atom type (x₁), NOT the velocity.
-        # Loss: cross-entropy(type_logits, true_atom_type_indices)
-        # At inference: vel_type = (softmax(type_logits) - z_t) / (1 - t + ε)
-        self.type_pred_head = nn.Sequential(
+        # Predicts velocity for atom types (categorical flow)
+        self.vel_type_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, num_atom_types),
         )
-        # Zero-init: model starts predicting uniform types → safe initialisation
-        nn.init.zeros_(self.type_pred_head[-1].weight)
-        nn.init.zeros_(self.type_pred_head[-1].bias)
 
         # ── Pocket Flexibility Heads (Induced Fit) ──
         # Queries: Pocket (N_P), Keys/Values: Ligand (N_L)
@@ -337,14 +327,13 @@ class SE3EGNN(nn.Module):
     def forward(
         self,
         x_L: torch.Tensor,           # (N_L, 3) ligand coords at time t
-        h_L_raw: torch.Tensor,        # (N_L, ligand_in_dim) raw features
-        atom_types_onehot: torch.Tensor,  # (N_L, num_atom_types) interpolated type
+        h_L_raw: torch.Tensor,        # (N_L, ligand_in_dim) raw features (IGNORED)
+        atom_types_onehot: torch.Tensor,  # (N_L, num_atom_types) noised one-hot
         t: torch.Tensor,              # (1,) or scalar — time in [0, 1]
         h_P: torch.Tensor,            # (N_P, pocket_dim) pocket embeddings
         ligand_bonds: torch.Tensor = None,  # (N_L, N_L, 4) bond type one-hots
         batch_L: torch.Tensor = None,  # (N_L,) graph assignment
         batch_P: torch.Tensor = None,  # (N_P,) graph assignment
-        sc_prior: torch.Tensor = None, # (N_L, num_atom_types) self-conditioning prior
     ) -> dict:
         device = x_L.device
         N_L = x_L.size(0)
@@ -354,12 +343,8 @@ class SE3EGNN(nn.Module):
         if t_emb.size(0) == 1 and N_L > 1:
             t_emb = t_emb.expand(N_L, -1)                      # (N_L, hidden_dim)
 
-        # Self-conditioning prior: zeros when disabled (first step / 50% of training)
-        if sc_prior is None:
-            sc_prior = torch.zeros(N_L, self.num_atom_types, device=device)
-
-        # Project concatenated features: raw + noised types + sc_prior
-        h_in = torch.cat([h_L_raw, atom_types_onehot, sc_prior], dim=-1)
+        # Project concatenated raw features and noised atom types
+        h_in = torch.cat([h_L_raw, atom_types_onehot], dim=-1)
         h_L = self.ligand_proj(h_in)                           # (N_L, hidden_dim)
 
         # Add time embedding (t_emb is already (N_L, hidden_dim) after expand)
@@ -407,13 +392,18 @@ class SE3EGNN(nn.Module):
                                         device=edge_feat_rbf.device)
             edge_feat = torch.cat([edge_feat_rbf, bond_feat], dim=-1)
 
-        # Output heads
-        vel_coord = self.vel_coord_head(h_L)      # (N_L, 3) — coordinate velocity
-        type_logits = self.type_pred_head(h_L)    # (N_L, num_atom_types) — x1 prediction logits
+        # Velocity heads
+        vel_coord = self.vel_coord_head(h_L)   # (N_L, 3)
+        vel_type = self.vel_type_head(h_L)      # (N_L, num_atom_types)
 
         # ── Pocket Flexibility (Induced Fit) ──
-        h_P_updated = self.pocket_vel_cross_attn(h_P, h_L, batch_P, batch_L)
-        vel_pocket = self.vel_pocket_head(h_P_updated)  # (N_P, 3)
+        # Let pocket attend to the final ligand features to figure out how to move
+        # PocketCrossAttention.forward(h_L=queries, h_P=keys/values, batch_L, batch_P)
+        # Here we REVERSE the roles: pocket queries, ligand provides context
+        h_P_updated = self.pocket_vel_cross_attn(
+            h_P, h_L, batch_P, batch_L
+        )
+        vel_pocket = self.vel_pocket_head(h_P_updated) # (N_P, 3)
 
         # Affinity value head: per-graph mean-pool
         if batch_L is not None:
@@ -425,7 +415,7 @@ class SE3EGNN(nn.Module):
 
         return {
             "vel_coord": vel_coord,
-            "type_logits": type_logits,   # x1 prediction logits (NOT velocity)
+            "vel_type": vel_type,
             "vel_pocket": vel_pocket,
             "pK_pred": pK_pred.squeeze() if pK_pred.numel() == 1 else pK_pred,
             "h_L": h_L,

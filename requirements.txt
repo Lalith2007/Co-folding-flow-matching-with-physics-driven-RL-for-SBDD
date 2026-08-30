@@ -1,17 +1,25 @@
 # Core Deep Learning
 torch>=2.0.0
 
-# Chemistry & Biology
+# Chemistry, Biology & Molecular Physics
 rdkit-pypi
 biopython
+vina>=1.2.5
+meeko>=0.5.0
+gemmi
 
-# Math, Data, and Config
+# Math, Data, Config & Utilities
 numpy<2.0.0
-PyYAML
 scipy
 pandas
+PyYAML
+tqdm
 
-# Backend API
+# Visualization & Scientific Plotting
+matplotlib
+seaborn
+
+# Backend Web App API
 fastapi
 uvicorn
 python-multipart
