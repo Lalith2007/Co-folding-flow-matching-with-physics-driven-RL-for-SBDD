@@ -23,7 +23,7 @@ html_content = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Structure-Conditioned Equivariant Flow Matching with Reinforcement Learning for De Novo Structure-Based Drug Design</title>
+<title>PROTEUS: Protein-Conditioned Equivariant Flow Matching with Multi-Objective RL for De Novo SBDD</title>
 <style>
     @page {
         size: letter;
@@ -158,7 +158,7 @@ html_content = """<!DOCTYPE html>
 <!-- ======================================================================= -->
 <!-- PAGE 1: Title, Abstract, Introduction                                   -->
 <!-- ======================================================================= -->
-<h1 class="title">Structure-Conditioned Equivariant Flow Matching with Reinforcement Learning for De Novo Structure-Based Drug Design and Multi-Target 600 ns Explicit-Solvent Molecular Dynamics Validation</h1>
+<h1 class="title">PROTEUS: Protein-Conditioned Equivariant Flow Matching with Multi-Objective Reinforcement Learning for De Novo Drug Design and Multi-Target 600 ns Explicit MD Validation</h1>
 <div class="subtitle">A Comprehensive Theoretical Framework, SOTA CrossDocked2020 Benchmarking, and All-Atom Biophysical Stability Suite</div>
 
 <div class="abstract-box">
@@ -458,7 +458,7 @@ We evaluated our model on the standardized CrossDocked2020 benchmark across 20 u
             <td>0 ns</td>
         </tr>
         <tr style="background-color: #eaf4fb; font-weight: bold;">
-            <td>Ours (Flow + RL)</td>
+            <td><strong>PROTEUS (Ours)</strong></td>
             <td>This Study</td>
             <td>100.0%</td>
             <td>100.0%</td>
@@ -530,7 +530,7 @@ Standard 2D SMILES validity does not verify whether 3D atomic coordinates satisf
             <td>54.0%</td>
         </tr>
         <tr style="background-color: #eaf4fb; font-weight: bold;">
-            <td>Ours (Flow + RL)</td>
+            <td><strong>PROTEUS (Ours)</strong></td>
             <td><strong>4.25</strong></td>
             <td><strong>7.12</strong></td>
             <td><strong>0.00% (Zero Clashes)</strong></td>
@@ -785,7 +785,7 @@ To quantify the exact contribution of RL policy fine-tuning, we conducted an abl
             <td>64.0%</td>
         </tr>
         <tr style="background-color: #eaf4fb; font-weight: bold;">
-            <td>+ Multi-Objective RL (Final)</td>
+            <td><strong>PROTEUS (Full Pipeline)</strong></td>
             <td><strong>100.0%</strong></td>
             <td><strong>100.0%</strong></td>
             <td><strong>0.643 +- 0.11</strong></td>

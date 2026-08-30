@@ -1,4 +1,4 @@
-# Structure-Conditioned Equivariant Flow Matching with Multi-Objective Reinforcement Learning for De Novo Structure-Based Drug Design
+# 🧬 PROTEUS: Protein-Conditioned Equivariant Flow Matching with Multi-Objective Reinforcement Learning for De Novo Structure-Based Drug Design
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2+-ee4c2c.svg)](https://pytorch.org/)
@@ -6,7 +6,7 @@
 [![RDKit](https://img.shields.io/badge/RDKit-2023.09+-orange.svg)](https://www.rdkit.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Official repository for **"Structure-Conditioned Equivariant Flow Matching with Reinforcement Learning for De Novo Structure-Based Drug Design and Multi-Target 600 ns Explicit-Solvent Molecular Dynamics Validation"**.
+Official repository for **PROTEUS: Protein-Conditioned Equivariant Flow Matching with Multi-Objective Reinforcement Learning for De Novo Drug Design and Multi-Target 600 ns Explicit MD Validation**.
 
 ---
 
@@ -18,7 +18,7 @@ Structure-Based Drug Design (SBDD) powered by 3D deep generative models aims to 
 2. **The Docking Fallacy**: Models are evaluated exclusively via static, empirical grid-based docking approximations (AutoDock Vina), completely ignoring protein backbone flexibility, solvent entropy, polarization, and dynamical stability (0 ns of explicit-solvent MD in published literature).
 
 ### ✨ Our Solution:
-We introduce a unified framework combining **SE(3)-equivariant continuous optimal transport flow matching** with **multi-objective Proximal Policy Optimization (PPO) reinforcement learning co-folding**, followed by an unprecedented **600.0 ns multi-target explicit-solvent all-atom Molecular Dynamics (MD) validation suite**.
+We introduce **PROTEUS**, a unified framework combining **SE(3)-equivariant continuous optimal transport flow matching** with **multi-objective Proximal Policy Optimization (PPO) reinforcement learning co-folding**, followed by an unprecedented **600.0 ns multi-target explicit-solvent all-atom Molecular Dynamics (MD) validation suite**.
 
 ```
     [ Protein Pocket (PDB) ]
@@ -39,7 +39,7 @@ We introduce a unified framework combining **SE(3)-equivariant continuous optima
 
 Evaluated on the standard **CrossDocked2020 test benchmark** across 20 unseen diverse therapeutic target pockets (200 generated molecules):
 
-| Metric | Pocket2Mol (ICML '22) | TargetDiff (ICLR '23) | DiffGUI (NatComm '24) | DeCoDe (NeurIPS '23) | MolFORM (Bioinf '24) | **Ours (Flow + RL)** |
+| Metric | Pocket2Mol (ICML '22) | TargetDiff (ICLR '23) | DiffGUI (NatComm '24) | DeCoDe (NeurIPS '23) | MolFORM (Bioinf '24) | **PROTEUS (Ours)** |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Chemical Validity (RDKit)** | 92.8% | 99.2% | 99.5% | 98.4% | 93.8% | **100.0%** (200/200) |
 | **PoseBusters PB-Valid (3D Sanity)** | 28.0% | 32.0% | 48.0% | 54.0% | 46.0% | **100.0%** (Flawless) |
@@ -221,7 +221,7 @@ If you find this codebase, framework, or benchmark helpful in your research, ple
 
 ```bibtex
 @article{sbdd_flow_matching_rl_2026,
-  title={Structure-Conditioned Equivariant Flow Matching with Reinforcement Learning for De Novo Structure-Based Drug Design and Multi-Target 600 ns Explicit-Solvent Molecular Dynamics Validation},
+  title={PROTEUS: Protein-Conditioned Equivariant Flow Matching with Multi-Objective Reinforcement Learning for De Novo Structure-Based Drug Design and Multi-Target 600 ns Explicit-Solvent Molecular Dynamics Validation},
   author={Lalith, K. and Collaborators},
   journal={arXiv preprint},
   year={2026}

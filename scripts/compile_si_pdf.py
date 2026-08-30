@@ -82,7 +82,7 @@ html_content = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Supplementary Information: Structure-Conditioned Equivariant Flow Matching with Reinforcement Learning for De Novo SBDD</title>
+<title>Supplementary Information: PROTEUS Framework for De Novo Structure-Based Drug Design</title>
 <style>
     @page {{
         size: letter;
@@ -196,11 +196,11 @@ html_content = f"""<!DOCTYPE html>
 <!-- ======================================================================= -->
 <!-- PAGE S1: Cover & Section S1 (Per-Pocket Benchmark Breakdown)            -->
 <!-- ======================================================================= -->
-<h1 class="title">Supplementary Information: Structure-Conditioned Equivariant Flow Matching with Reinforcement Learning for De Novo Structure-Based Drug Design</h1>
+<h1 class="title">Supplementary Information: PROTEUS — Protein-Conditioned Equivariant Flow Matching with Multi-Objective RL for De Novo SBDD</h1>
 <div class="subtitle">Complete Per-Pocket Benchmark Metrics, 2D Chemical Structures, MD Parameter Topologies, and Extended Dynamics Convergence Analyses</div>
 
 <div class="header-box">
-    <strong>Companion Document to Main Research Manuscript.</strong> This document provides exhaustive supporting data, including per-pocket quantitative metrics across all 20 standardized CrossDocked2020 test pockets, 2D chemical structure representations and SMILES for generated leads, complete OpenMM / Amber14SB / GAFF2 simulation parameter files, and per-residue RMSF / SASA / radius of gyration trajectory convergence profiles across 600.0 ns of explicit-solvent Molecular Dynamics.
+    <strong><strong>PROTEUS Companion Supplementary Document.</strong></strong> This document provides exhaustive supporting data, including per-pocket quantitative metrics across all 20 standardized CrossDocked2020 test pockets, 2D chemical structure representations and SMILES for generated leads, complete OpenMM / Amber14SB / GAFF2 simulation parameter files, and per-residue RMSF / SASA / radius of gyration trajectory convergence profiles across 600.0 ns of explicit-solvent Molecular Dynamics.
 </div>
 
 <h2>Section S1: Comprehensive Per-Pocket Benchmark Breakdown on CrossDocked2020</h2>
