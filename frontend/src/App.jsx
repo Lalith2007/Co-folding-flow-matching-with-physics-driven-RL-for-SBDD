@@ -33,7 +33,8 @@ import {
   FileCode2,
   FolderDown,
   Cpu,
-  AlertCircle
+  AlertCircle,
+  EyeOff
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -101,7 +102,7 @@ const PRESET_TARGETS = {
 export default function App() {
   const [selectedTargetKey, setSelectedTargetKey] = useState('custom');
   const [customPdbData, setCustomPdbData] = useState(null);
-  const [customPdbName, setCustomPdbName] = useState('Custom_Protein.pdb');
+  const [customPdbName, setCustomPdbName] = useState('1HFR.pdb');
   const [customPdbFile, setCustomPdbFile] = useState(null);
   const [customPdbIdInput, setCustomPdbIdInput] = useState('');
   const [isLoadingPdb, setIsLoadingPdb] = useState(false);
@@ -114,9 +115,14 @@ export default function App() {
   const [selectedMolIndex, setSelectedMolIndex] = useState(0);
   const [copiedSmiles, setCopiedSmiles] = useState(false);
   const [copiedBibtex, setCopiedBibtex] = useState(false);
+  
+  // 3D Visual Controls
   const [isSpinning, setIsSpinning] = useState(false);
-  const [showSurface, setShowSurface] = useState(true);
   const [showCartoon, setShowCartoon] = useState(true);
+  const [showSurface, setShowSurface] = useState(false);
+  const [showLigand, setShowLigand] = useState(true);
+  const [cartoonColor, setCartoonColor] = useState('spectrum'); // spectrum | ss | cyan
+
   const [backendStatus, setBackendStatus] = useState({ online: false, device: 'loading' });
   const [serverTimings, setServerTimings] = useState(null);
 
@@ -182,27 +188,36 @@ export default function App() {
     } else if (pdbContent) {
       renderPdbInViewer(viewer, pdbContent);
     }
-  }, [selectedTargetKey, customPdbData, showCartoon, showSurface]);
+  }, [selectedTargetKey, customPdbData, showCartoon, showSurface, showLigand, cartoonColor]);
 
   const renderPdbInViewer = (viewer, pdbText) => {
     try {
       viewer.clear();
       viewer.addModel(pdbText, "pdb");
 
+      // 1. Crystal-clear Protein Backbone Ribbon Cartoon
       if (showCartoon) {
         viewer.setStyle({ hetflag: false }, { 
-          cartoon: { color: 'spectrum', opacity: 0.85, thickness: 0.45 } 
+          cartoon: { 
+            color: cartoonColor === 'ss' ? 'ssJmol' : (cartoonColor === 'cyan' ? '#06b6d4' : 'spectrum'), 
+            opacity: 1.0, 
+            ribbon: true 
+          } 
         });
       }
 
-      viewer.setStyle({ hetflag: true }, { 
-        stick: { colorscheme: 'greenCarbon', radius: 0.32 } 
-      });
+      // 2. Bound Ligand / Heteroatom Sticks
+      if (showLigand) {
+        viewer.setStyle({ hetflag: true }, { 
+          stick: { colorscheme: 'greenCarbon', radius: 0.30 } 
+        });
+      }
 
+      // 3. Optional Semi-Transparent Molecular Cavity Surface
       if (showSurface) {
         viewer.addSurface(window.$3Dmol.SurfaceType.VDW, {
-          opacity: 0.28,
-          color: 'teal'
+          opacity: 0.22,
+          color: '#06b6d4'
         }, { hetflag: false });
       }
 
@@ -865,27 +880,94 @@ END
                 </div>
               </div>
 
-              {/* In-Canvas Control Bar */}
-              <div className="p-4 bg-slate-900/95 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              {/* In-Canvas Comprehensive Control Bar */}
+              <div className="p-3.5 bg-slate-900/95 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex items-center gap-2">
                   <Badge className="bg-emerald-500/20 text-emerald-300 border-emerald-500/30 font-mono text-xs">
-                    Target: {customPdbName}
+                    {customPdbName}
                   </Badge>
-                  <span className="text-xs text-slate-400 font-medium">
-                    {customPdbData ? `${customPdbData.length.toLocaleString()} bytes loaded` : 'Active Canvas'}
+                  <span className="text-xs text-slate-400 font-medium hidden sm:inline">
+                    {customPdbData ? `${customPdbData.length.toLocaleString()} bytes` : 'Active'}
                   </span>
                 </div>
 
-                <div className="flex items-center gap-2">
+                {/* Interactive Display Toggles */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  
+                  {/* Cartoon Ribbon Toggle */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setShowCartoon(!showCartoon)}
+                    className={`text-xs px-2.5 py-1 border-slate-700 cursor-pointer ${
+                      showCartoon ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50' : 'text-slate-500 hover:text-slate-300'
+                    }`}
+                    title="Toggle Protein Secondary Structure Ribbon"
+                  >
+                    <Layers className="w-3.5 h-3.5 mr-1" />
+                    <span>Strand {showCartoon ? 'ON' : 'OFF'}</span>
+                  </Button>
+
+                  {/* Cartoon Color Scheme Mode */}
+                  {showCartoon && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const modes = ['spectrum', 'ss', 'cyan'];
+                        const nextIndex = (modes.indexOf(cartoonColor) + 1) % modes.length;
+                        setCartoonColor(modes[nextIndex]);
+                      }}
+                      className="text-xs px-2 py-1 border-slate-700 text-slate-300 hover:text-white cursor-pointer"
+                      title="Cycle Color Scheme (Spectrum / Secondary Structure / Cyan)"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 mr-1 text-emerald-400" />
+                      <span className="uppercase text-[10px] font-mono">{cartoonColor}</span>
+                    </Button>
+                  )}
+
+                  {/* Surface Cavity Toggle */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setShowSurface(!showSurface)}
+                    className={`text-xs px-2.5 py-1 border-slate-700 cursor-pointer ${
+                      showSurface ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50' : 'text-slate-500 hover:text-slate-300'
+                    }`}
+                    title="Toggle Semi-Transparent Pocket Surface"
+                  >
+                    <Eye className="w-3.5 h-3.5 mr-1" />
+                    <span>Surface {showSurface ? 'ON' : 'OFF'}</span>
+                  </Button>
+
+                  {/* Ligand Stick Toggle */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setShowLigand(!showLigand)}
+                    className={`text-xs px-2.5 py-1 border-slate-700 cursor-pointer ${
+                      showLigand ? 'bg-amber-500/20 text-amber-300 border-amber-500/50' : 'text-slate-500 hover:text-slate-300'
+                    }`}
+                    title="Toggle Ligand Atoms Stick"
+                  >
+                    <FlaskConical className="w-3.5 h-3.5 mr-1" />
+                    <span>Ligand</span>
+                  </Button>
+
+                  {/* Auto-Spin */}
                   <Button
                     size="sm"
                     variant="outline"
                     onClick={toggleSpin}
-                    className={`text-xs border-slate-700 text-slate-300 cursor-pointer ${isSpinning ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50' : 'hover:bg-slate-800'}`}
+                    className={`text-xs px-2.5 py-1 border-slate-700 cursor-pointer ${
+                      isSpinning ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50' : 'text-slate-400 hover:text-slate-200'
+                    }`}
                   >
-                    <RotateCw className={`w-3.5 h-3.5 mr-1.5 ${isSpinning ? 'animate-spin' : ''}`} />
-                    {isSpinning ? 'Spinning' : 'Auto-Spin'}
+                    <RotateCw className={`w-3.5 h-3.5 mr-1 ${isSpinning ? 'animate-spin' : ''}`} />
+                    <span>Spin</span>
                   </Button>
+
+                  {/* Recenter */}
                   <Button
                     size="sm"
                     variant="outline"
@@ -895,10 +977,11 @@ END
                         glViewerRef.current.render();
                       }
                     }}
-                    className="text-xs border-slate-700 text-slate-300 hover:bg-slate-800 cursor-pointer"
+                    className="text-xs px-2.5 py-1 border-slate-700 text-slate-400 hover:text-white cursor-pointer"
                   >
                     Recenter
                   </Button>
+
                 </div>
               </div>
             </Card>
