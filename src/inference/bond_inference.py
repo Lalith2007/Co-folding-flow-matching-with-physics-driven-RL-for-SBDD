@@ -13,6 +13,7 @@ from generate.py:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -252,7 +253,7 @@ def _fail(error: str) -> Dict:
 
 
 def validate_smiles(smiles: str) -> Dict:
-    """Validate a SMILES string and compute realistic pharmaceutical properties."""
+    """Validate a SMILES string and compute realistic, continuous pharmaceutical properties."""
     try:
         from rdkit import Chem
         from rdkit.Chem import Descriptors, QED, rdMolDescriptors
@@ -261,21 +262,34 @@ def validate_smiles(smiles: str) -> Dict:
         if mol is None:
             return {"valid": False, "error": "RDKit could not parse SMILES"}
 
-        # Realistic Medicinal Chemistry SA Score (1=easy, 10=hard)
+        # ── Continuous Ertl-like SA Score (1.0 = easy, 10.0 = hard) ──
         num_heavy = mol.GetNumHeavyAtoms()
-        num_rings = rdMolDescriptors.CalcNumRings(mol)
         num_rotatable = Descriptors.NumRotatableBonds(mol)
         num_stereo = len(Chem.FindMolChiralCenters(mol, includeUnassigned=True))
 
         ring_info = mol.GetRingInfo()
+        num_rings = ring_info.NumRings()
         bridge_atoms = sum(1 for i in range(mol.GetNumAtoms()) if ring_info.NumAtomRings(i) > 1)
+        spiro_atoms = sum(1 for i in range(mol.GetNumAtoms()) if ring_info.NumAtomRings(i) == 2 and len(mol.GetAtomWithIdx(i).GetBonds()) == 4)
 
-        size_term = max(0.0, (num_heavy - 15) * 0.05)
-        ring_term = (num_rings * 0.28) + (bridge_atoms * 0.15)
-        stereo_term = num_stereo * 0.12
+        # 1. Base Fragment Score
+        num_aromatic = sum(1 for a in mol.GetAtoms() if a.GetIsAromatic())
+        aromatic_ratio = num_aromatic / max(num_heavy, 1)
+        base_frag = 2.4 - (aromatic_ratio * 0.6)
 
-        raw_sa = 2.15 + size_term + ring_term + stereo_term
-        sa_score = round(max(1.8, min(5.5, raw_sa)), 2)
+        # 2. Size Penalty
+        size_penalty = (num_heavy ** 1.005) - num_heavy
+
+        # 3. Ring Topology Penalty
+        small_rings = sum(1 for r in ring_info.AtomRings() if len(r) in (3, 4))
+        ring_penalty = (math.log(bridge_atoms + 1) * 0.8) + (math.log(spiro_atoms + 1) * 0.6) + (small_rings * 0.35)
+
+        # 4. Stereocenter Penalty
+        stereo_penalty = math.log(num_stereo + 1) * 0.5
+
+        # 5. Continuous combination without artificial clamping
+        raw = base_frag + (size_penalty * 0.05) + ring_penalty + stereo_penalty
+        sa_score = round(float(1.0 + (raw / 4.5) * 2.8), 2)
 
         # Atom & Molecule Stability
         stable = []
