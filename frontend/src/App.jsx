@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Hero } from './components/ui/liquid-metal-vortex';
+import ProteinTransition from './components/ui/protein-transition';
 import { Button } from './components/ui/button';
 import { Badge } from './components/ui/badge';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from './components/ui/card';
@@ -120,7 +121,7 @@ export default function App() {
   const glViewerRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  // Load default custom data on initial mount (e.g. 7IN2 / 1HFR)
+  // Load default custom data on initial mount
   useEffect(() => {
     fetch('https://files.rcsb.org/download/1HFR.pdb')
       .then(res => res.text())
@@ -326,7 +327,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col selection:bg-emerald-500 selection:text-slate-950 font-sans">
       
-      {/* ── Header ── */}
+      {/* ── 1. Top Navigation Bar ── */}
       <header className="sticky top-0 z-50 glass-panel border-b border-slate-800/80 px-6 py-3.5 backdrop-blur-md">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -389,7 +390,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── Hero Section with Vibrant WebGL Liquid Metal Shader ── */}
+      {/* ── 1. Hero Section with Vibrant WebGL Liquid Metal Shader (UNTOUCHED) ── */}
       <div className="relative">
         <Hero
           title="PROTEUS"
@@ -444,7 +445,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* ── Key Metrics Banner ── */}
+      {/* ── Metric Ticker ── */}
       <section className="bg-slate-900/90 border-y border-slate-800 py-6 px-6 relative z-20">
         <div className="max-w-7xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
           <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800">
@@ -470,7 +471,14 @@ export default function App() {
         </div>
       </section>
 
-      {/* ── Main Upload & In-Situ De Novo Generation Studio ── */}
+      {/* ── 2. NEW 3D SCIENTIFIC VISUAL TRANSITION / INTERSTITIAL BRIDGE ── */}
+      <ProteinTransition 
+        tagline="IN-SITU CONFORMATIONAL BRIDGE"
+        title="STRUCTURAL BIOPHYSICAL SPACE"
+        subtitle="Continuous SE(3)-equivariant vector fields guide probability flows from Gaussian noise into atomically precise, thermodynamically stable pocket-docked 3D ligands."
+      />
+
+      {/* ── 3. Main Upload & In-Situ De Novo Generation Studio ── */}
       <main id="generator-section" className="max-w-7xl mx-auto px-6 py-16 w-full space-y-16">
         
         {/* Section Header */}
@@ -821,7 +829,7 @@ export default function App() {
 
       </main>
 
-      {/* ── 600 ns Explicit MD Trajectory Section ── */}
+      {/* ── 4. 600 ns Explicit MD Trajectory Section ── */}
       <section id="md-section" className="bg-slate-900/60 border-t border-slate-800 py-16 px-6">
         <div className="max-w-7xl mx-auto space-y-12">
           
@@ -938,7 +946,7 @@ export default function App() {
         </div>
       </section>
 
-      {/* ── Benchmark Comparison Section ── */}
+      {/* ── 5. Benchmark Comparison Section ── */}
       <section id="benchmark-section" className="py-16 px-6 max-w-7xl mx-auto space-y-8 w-full">
         <div className="text-center max-w-3xl mx-auto space-y-3">
           <Badge className="bg-purple-500/20 text-purple-300 border-purple-500/30 text-xs px-3 py-1 font-semibold">
@@ -1036,7 +1044,7 @@ export default function App() {
         </div>
       </section>
 
-      {/* ── Publication & Downloads Section ── */}
+      {/* ── 6. Publication & Downloads Section ── */}
       <section className="bg-slate-900/90 border-t border-slate-800 py-16 px-6">
         <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
           
