@@ -46,10 +46,11 @@ const PRESET_TARGETS = {
     description: 'Critical enzyme in DNA synthesis; open hydrophilic cavity targeted by methotrexate-class therapeutics.',
     leadSmiles: 'Nc1nc(N)c2nc(CNc3ccc(C(=O)O)cc3)cnc2n1',
     leadName: 'PROTEUS Lead #1 (DHFR Inhibitor)',
-    mw: 279.3,
-    logp: 1.84,
-    qed: 0.712,
-    sa: 3.42,
+    mw: '279.3',
+    logp: '1.84',
+    qed: '0.712',
+    sa: '3.42',
+    normSa: '0.731',
     lipinski: 'PASS (5/5)',
     rmsd: '1.42 ± 0.14 Å',
     hbonds: 'Glu30 (98.4%), Ile7 (94.2%)',
@@ -64,10 +65,11 @@ const PRESET_TARGETS = {
     description: 'Essential eukaryotic kinase involved in anti-apoptotic signaling with a deep, hydrophobic ATP hinge cleft.',
     leadSmiles: 'Nc1nc(NCc2ccccc2)c2ncn(C(C)C)c2n1',
     leadName: 'PROTEUS Lead #2 (CK2 Allosteric Lead)',
-    mw: 298.4,
-    logp: 2.35,
-    qed: 0.684,
-    sa: 3.65,
+    mw: '298.4',
+    logp: '2.35',
+    qed: '0.684',
+    sa: '3.65',
+    normSa: '0.706',
     lipinski: 'PASS (5/5)',
     rmsd: '1.42 ± 0.12 Å',
     hbonds: 'Lys68 (96.8%), Glu81 (92.5%)',
@@ -82,10 +84,11 @@ const PRESET_TARGETS = {
     description: 'Classic metalloenzyme with a catalytic Zn2+ center and aromatic primary specificity S1 subpocket.',
     leadSmiles: 'CCCC1OC2CCC(CCCC2C(C)O)CC1C',
     leadName: 'PROTEUS Lead #3 (Zinc Chelating Lead)',
-    mw: 254.4,
-    logp: 2.91,
-    qed: 0.661,
-    sa: 4.15,
+    mw: '254.4',
+    logp: '2.91',
+    qed: '0.661',
+    sa: '4.15',
+    normSa: '0.650',
     lipinski: 'PASS (5/5)',
     rmsd: '1.42 ± 0.11 Å',
     hbonds: 'Arg127 (97.1%), Glu270 (95.6%), Tyr248 (91.8%)',
@@ -320,6 +323,9 @@ export default function App() {
 
       const results = candidateList.map((c, idx) => {
         const p = c.properties || {};
+        const rawSa = p.sa_score !== undefined ? Number(p.sa_score) : (4.5 + idx * 0.4);
+        const normSaVal = Math.max(0.0, Math.min(1.0, (10.0 - rawSa) / 9.0));
+
         return {
           id: `PROTEUS-LEAD-${idx + 1}`,
           name: `De Novo Lead #${idx + 1}`,
@@ -328,7 +334,8 @@ export default function App() {
           source: 'PROTEUS Generative Engine',
           isRealNeural: true,
           qed: p.qed !== undefined ? Number(p.qed).toFixed(3) : (0.65 + idx * 0.03).toFixed(3),
-          sa: p.sa_score !== undefined ? Number(p.sa_score).toFixed(2) : (3.2 + idx * 0.25).toFixed(2),
+          normSa: normSaVal.toFixed(3),
+          sa: rawSa.toFixed(2),
           mw: p.molecular_weight !== undefined ? Number(p.molecular_weight).toFixed(1) : (285.0 + idx * 15).toFixed(1),
           logp: p.logp !== undefined ? Number(p.logp).toFixed(2) : (1.65 + idx * 0.4).toFixed(2),
           lipinski: 'PASS (5/5)',
@@ -348,9 +355,9 @@ export default function App() {
       // Client Demo Fallback
       setTimeout(() => {
         const samplePool = [
-          { smiles: 'Nc1nc(N)c2nc(CNc3ccc(C(=O)O)cc3)cnc2n1', name: 'Lead Candidate #1 (Aminopterin Heterocycle)', qed: '0.712', sa: '3.42', mw: '279.3', logp: '1.84' },
-          { smiles: 'Nc1nc(NCc2ccccc2)c2ncn(C(C)C)c2n1', name: 'Lead Candidate #2 (Purine Kinase Core)', qed: '0.684', sa: '3.65', mw: '298.4', logp: '2.35' },
-          { smiles: 'CCCC1OC2CCC(CCCC2C(C)O)CC1C', name: 'Lead Candidate #3 (Macrocyclic Chelation Core)', qed: '0.661', sa: '4.15', mw: '254.4', logp: '2.91' }
+          { smiles: 'Nc1nc(N)c2nc(CNc3ccc(C(=O)O)cc3)cnc2n1', name: 'Lead Candidate #1 (Aminopterin Heterocycle)', qed: '0.712', sa: '3.42', normSa: '0.731', mw: '279.3', logp: '1.84' },
+          { smiles: 'Nc1nc(NCc2ccccc2)c2ncn(C(C)C)c2n1', name: 'Lead Candidate #2 (Purine Kinase Core)', qed: '0.684', sa: '3.65', normSa: '0.706', mw: '298.4', logp: '2.35' },
+          { smiles: 'CCCC1OC2CCC(CCCC2C(C)O)CC1C', name: 'Lead Candidate #3 (Macrocyclic Chelation Core)', qed: '0.661', sa: '4.15', normSa: '0.650', mw: '254.4', logp: '2.91' }
         ];
 
         const results = samplePool.slice(0, numMoleculesToGen).map((m, idx) => ({
@@ -361,6 +368,7 @@ export default function App() {
           source: 'Client Emulation Engine',
           isRealNeural: false,
           qed: m.qed,
+          normSa: m.normSa,
           sa: m.sa,
           mw: m.mw,
           logp: m.logp,
@@ -438,7 +446,10 @@ ${customPdbName}
 > <QED>
 ${mol.qed}
 
-> <SA_SCORE>
+> <NORM_SA_SCORE>
+${mol.normSa}
+
+> <RAW_SA_SCORE>
 ${mol.sa}
 
 > <MOL_WEIGHT>
@@ -465,7 +476,7 @@ $$$$
     const pdbContent = `REMARK   PROTEUS De Novo Generated Small Molecule
 REMARK   Target PDB: ${customPdbName}
 REMARK   SMILES: ${mol.smiles}
-REMARK   QED: ${mol.qed} | SA: ${mol.sa} | Lipinski: ${mol.lipinski}
+REMARK   QED: ${mol.qed} | Norm. SA: ${mol.normSa} (Raw SA: ${mol.sa}) | Lipinski: ${mol.lipinski}
 HETATM    1  N1  LIG A   1       1.240   0.530  -0.120  1.00 20.00           N
 HETATM    2  C2  LIG A   1       0.120  -0.240   0.340  1.00 20.00           C
 HETATM    3  C3  LIG A   1      -1.150   0.450  -0.080  1.00 20.00           C
@@ -505,7 +516,7 @@ END
 REMARK   === PROTEUS DOCKED DE NOVO LIGAND ===
 REMARK   Lead Name: ${mol.name}
 REMARK   SMILES: ${mol.smiles}
-REMARK   QED: ${mol.qed} | SA: ${mol.sa} | MW: ${mol.mw}
+REMARK   QED: ${mol.qed} | Norm. SA: ${mol.normSa} (Raw SA: ${mol.sa}) | MW: ${mol.mw}
 HETATM 9001  N1  LIG Z   1       1.240   0.530  -0.120  1.00 20.00           N
 HETATM 9002  C2  LIG Z   1       0.120  -0.240   0.340  1.00 20.00           C
 HETATM 9003  C3  LIG Z   1      -1.150   0.450  -0.080  1.00 20.00           C
@@ -540,9 +551,9 @@ END
   // Download all batch candidates as CSV
   const handleDownloadBatchCSV = () => {
     if (generatedList.length === 0) return;
-    let csv = "ID,Name,Target_PDB,SMILES,QED,SA_Score,Molecular_Weight,LogP,Lipinski_Rule_of_5,PoseBusters_Validity,Estimated_MD_RMSD\n";
+    let csv = "ID,Name,Target_PDB,SMILES,QED,Normalized_SA,Raw_SA_Score,Molecular_Weight,LogP,Lipinski_Rule_of_5,PoseBusters_Validity,Estimated_MD_RMSD\n";
     generatedList.forEach(m => {
-      csv += `"${m.id}","${m.name}","${m.targetPdb}","${m.smiles}",${m.qed},${m.sa},${m.mw},${m.logp},"${m.lipinski}","${m.pbValid}","${m.rmsdEst}"\n`;
+      csv += `"${m.id}","${m.name}","${m.targetPdb}","${m.smiles}",${m.qed},${m.normSa},${m.sa},${m.mw},${m.logp},"${m.lipinski}","${m.pbValid}","${m.rmsdEst}"\n`;
     });
     downloadTextFile(`PROTEUS_Batch_Leads_${customPdbName.replace('.pdb', '')}.csv`, csv, 'text/csv');
   };
@@ -1050,12 +1061,13 @@ END
                       {/* Property Grid (Individual Real Metrics) */}
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-center">
                         <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800">
-                          <span className="text-[10px] text-slate-400 font-mono uppercase">QED</span>
+                          <span className="text-[10px] text-slate-400 font-mono uppercase">QED (Drug-like)</span>
                           <p className="text-base font-extrabold text-emerald-400">{currentMol.qed}</p>
                         </div>
-                        <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800">
-                          <span className="text-[10px] text-slate-400 font-mono uppercase">SA Score</span>
-                          <p className="text-base font-extrabold text-cyan-400">{currentMol.sa}</p>
+                        <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800" title={`Benchmark Synthesizability: ${currentMol.normSa} (Raw Ertl: ${currentMol.sa})`}>
+                          <span className="text-[10px] text-slate-400 font-mono uppercase">Norm. SA</span>
+                          <p className="text-base font-extrabold text-cyan-400">{currentMol.normSa}</p>
+                          <span className="text-[9px] text-slate-500 block font-mono">Raw: {currentMol.sa}</span>
                         </div>
                         <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800">
                           <span className="text-[10px] text-slate-400 font-mono uppercase">Mol Wt</span>
