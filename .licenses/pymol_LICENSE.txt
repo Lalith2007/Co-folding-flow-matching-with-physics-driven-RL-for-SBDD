@@ -1,4 +1,0 @@
-PyMOL License Notification:
-Please review the PyMOL license terms at https://www.pymol.org/
-Open-source PyMOL is used for research and visualization purposes.
-Timestamp: 2026-08-28T09:25:45+05:30
