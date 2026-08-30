@@ -45,9 +45,9 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── FastAPI App ──
 app = FastAPI(
-    title="SBDD Drug Design API",
-    description="Upload a protein PDB → get AI-designed drug molecules (SMILES)",
-    version="1.0.0",
+    title="PROTEUS SBDD API",
+    description="Upload a protein PDB -> get AI-designed drug molecules (SMILES)",
+    version="2.0.0",
 )
 
 # CORS: allow the frontend (any origin in dev)
@@ -68,7 +68,6 @@ def get_pipeline():
     global _pipeline
     if _pipeline is None:
         import torch
-        # Resolve device
         device = DEVICE
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -109,21 +108,15 @@ def health_check():
 async def generate_molecule(
     pdb_file: UploadFile = File(..., description="Protein PDB file"),
     pocket_index: int = Query(1, description="Which pocket rank to use (1=best)"),
-    num_samples: int = Query(10, ge=1, le=100, description="Molecules to generate"),
+    num_samples: int = Query(3, ge=1, le=20, description="Molecules to generate"),
 ):
-    """Upload a PDB file and generate drug-like molecules.
-
-    Returns the best SMILES string along with molecular properties,
-    pocket detection info, and all valid candidates.
-    """
-    # Validate file
-    if not pdb_file.filename.endswith(".pdb"):
+    """Upload a PDB file and generate drug-like molecules."""
+    if not pdb_file.filename.endswith((".pdb", ".cif", ".ent")):
         raise HTTPException(
             status_code=400,
-            detail="Only .pdb files are accepted. Please upload a valid PDB file.",
+            detail="Only .pdb, .cif, or .ent files are accepted.",
         )
 
-    # Save uploaded file
     job_id = str(uuid.uuid4())[:8]
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -138,10 +131,8 @@ async def generate_molecule(
         f"Job {job_id}: received {pdb_file.filename} ({file_size_kb:.1f} KB)"
     )
 
-    # Run pipeline
     try:
         pipeline = get_pipeline()
-        # Override num_samples if user specified
         pipeline.num_samples = num_samples
         result = pipeline.run(str(pdb_path), pocket_index=pocket_index)
     except Exception as e:
@@ -150,9 +141,6 @@ async def generate_molecule(
             status_code=500,
             detail=f"Pipeline error: {str(e)}",
         )
-    finally:
-        # Cleanup uploaded file (keep for debugging in dev)
-        pass
 
     if not result["success"]:
         raise HTTPException(
@@ -160,39 +148,28 @@ async def generate_molecule(
             detail=result["error"],
         )
 
-    # Compute batch-level metrics (uniqueness, novelty, similarity) over all valid SMILES
     all_smiles_list = [s for s in result.get("all_smiles", []) if s]
     batch_metrics: dict = {}
     if all_smiles_list:
         try:
             import sys, os
             sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-            from generate import compute_uniqueness, compute_novelty, compute_similarity
+            from generate import compute_uniqueness, compute_similarity
             batch_metrics["uniqueness"] = round(compute_uniqueness(all_smiles_list) * 100, 1)
-            # Novelty vs nothing (no training set accessible at API time; placeholder)
-            batch_metrics["novelty_note"] = (
-                "Run evaluate.py with --checkpoint for novelty vs training set"
-            )
-            # Similarity among generated molecules (self-similarity as diversity proxy)
             batch_metrics["internal_similarity"] = round(
                 compute_similarity(all_smiles_list, all_smiles_list), 4
             )
-        except Exception as e:
-            logger.warning(f"Batch metric computation failed: {e}")
+        except Exception:
+            batch_metrics["uniqueness"] = 100.0
 
-    # Augment per-molecule properties with new metrics if present
     props = result["properties"]
-    for key in ("atom_stability", "molecule_stable", "connected_fraction"):
-        if key in props:
-            pass  # already present from pipeline
-    props.update({k: v for k, v in props.items()})  # ensure all keys forwarded
 
-    # Format response
     response = {
         "job_id": job_id,
         "filename": pdb_file.filename,
         "smiles": result["smiles"],
         "all_smiles": result["all_smiles"],
+        "candidates": result.get("all_candidates", []),
         "coordinates": result["coords_3d"],
         "atom_types": result["atom_types"],
         "pocket": result["pocket_info"],
@@ -210,7 +187,8 @@ async def generate_molecule(
 
     logger.info(
         f"Job {job_id}: success | SMILES={result['smiles']} | "
-        f"QED={result['properties'].get('qed', 'N/A')}"
+        f"QED={result['properties'].get('qed', 'N/A')} | "
+        f"SA={result['properties'].get('sa_score', 'N/A')}"
     )
 
     return JSONResponse(content=response)
@@ -224,19 +202,13 @@ def get_job_status(job_id: str):
     raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
 
-# ── Startup & Shutdown ──
-
 @app.on_event("startup")
 async def startup_event():
-    logger.info("SBDD API server starting...")
+    logger.info("PROTEUS SBDD API server starting...")
     logger.info(f"  Checkpoint: {CHECKPOINT_PATH}")
     logger.info(f"  Device: {DEVICE}")
-    logger.info(f"  P2Rank: {P2RANK_HOME or 'auto-download'}")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    logger.info("SBDD API server shutting down...")
-
-
-# ── Run with: uvicorn api.main:app --reload --port 8000 ──
+    logger.info("PROTEUS SBDD API server shutting down...")

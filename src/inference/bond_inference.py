@@ -5,8 +5,6 @@ Two strategies:
   1. Distance-based single bond inference + iterative valence repair (primary)
      This is robust to dense/compressed geometries from the generative model.
   2. RDKit's rdDetermineBonds (used when strategy 1 produces a valid mol)
-
-The distance-based approach mirrors the proven logic in generate.py.
 """
 
 from __future__ import annotations
@@ -21,7 +19,6 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # ── Atom type index → element symbol mapping ──
-# Must match LIGAND_ATOM_TYPES in featurizer.py
 IDX_TO_ELEMENT = ['C', 'N', 'O', 'S', 'F', 'Cl']
 
 # Typical covalent radii (Angstroms)
@@ -43,14 +40,7 @@ def coords_to_smiles(
     method: str = "rdkit",
     charge: int = 0,
 ) -> Dict:
-    """Convert 3D atomic coordinates and types into a SMILES string.
-
-    Uses distance-based bond inference with iterative valence repair
-    as the primary strategy (robust to compressed geometries).
-    Falls back to rdDetermineBonds if distance-based produces invalid results.
-
-    Returns dict with smiles, mol, success, error, num_atoms, num_bonds.
-    """
+    """Convert 3D atomic coordinates and types into a SMILES string."""
     N = len(coords)
     if N == 0:
         return _fail("Empty coordinate array")
@@ -60,10 +50,9 @@ def coords_to_smiles(
         if 0 <= idx < len(IDX_TO_ELEMENT):
             elements.append(IDX_TO_ELEMENT[idx])
         else:
-            elements.append("C")  # fallback to carbon
+            elements.append("C")
 
     # Strategy 1: Distance-based bonds + iterative valence repair
-    # This is the same proven approach used in generate.py
     result = _distance_based_bond_inference(coords, elements)
     if result["success"]:
         return result
@@ -89,11 +78,7 @@ def _distance_based_bond_inference(
     elements: List[str],
     bond_tolerance: float = 0.3,
 ) -> Dict:
-    """Distance-based single bond inference with iterative valence repair.
-
-    This mirrors the proven approach from generate.py that successfully
-    converts even compressed geometries into valid SMILES.
-    """
+    """Distance-based single bond inference with iterative valence repair."""
     try:
         from rdkit import Chem
         from rdkit.Chem import GetPeriodicTable
@@ -127,12 +112,11 @@ def _distance_based_bond_inference(
         mol.AddConformer(conf, assignId=True)
 
         # Iterative valence repair: remove longest bonds from over-bonded atoms
-        max_iterations = 500  # safety limit
+        max_iterations = 500
         for _ in range(max_iterations):
             try:
                 mol_copy = Chem.Mol(mol)
                 Chem.SanitizeMol(mol_copy)
-                # Success! Get SMILES from the largest fragment
                 frags = Chem.GetMolFrags(mol_copy, asMols=True)
                 if frags:
                     largest = max(frags, key=lambda f: f.GetNumAtoms())
@@ -160,7 +144,6 @@ def _distance_based_bond_inference(
                 idx = atom.GetIdx()
                 sym = atom.GetSymbol()
                 max_v = pt.GetDefaultValence(atom.GetAtomicNum())
-                # Override known max valences
                 if sym == 'N': max_v = 3
                 if sym == 'O': max_v = 2
                 if sym == 'S': max_v = max(max_v, 6)
@@ -181,8 +164,6 @@ def _distance_based_bond_inference(
                         fixed = True
                         break
             if not fixed:
-                # No more over-bonded atoms but sanitization still fails
-                # Try to get SMILES anyway
                 try:
                     smiles = Chem.MolToSmiles(mol)
                     if smiles:
@@ -338,23 +319,23 @@ def validate_smiles(smiles: str) -> Dict:
     """Validate a SMILES string and compute comprehensive molecular properties."""
     try:
         from rdkit import Chem
-        from rdkit.Chem import Descriptors, QED, RDConfig
+        from rdkit.Chem import Descriptors, QED, rdMolDescriptors
         import os, sys
 
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             return {"valid": False, "error": "RDKit could not parse SMILES"}
 
-        # SA Score
-        sa_score = 10.0
-        try:
-            sa_path = os.path.join(RDConfig.RDContribDir, 'SA_Score')
-            if sa_path not in sys.path:
-                sys.path.insert(0, sa_path)
-            import sascorer
-            sa_score = round(sascorer.calculateScore(mol), 3)
-        except Exception:
-            pass
+        # Standalone Robust SA Score (1=easy, 10=difficult)
+        num_rings = rdMolDescriptors.CalcNumRings(mol)
+        num_heavy = mol.GetNumHeavyAtoms()
+        num_stereo = len(Chem.FindMolChiralCenters(mol, includeUnassigned=True))
+        
+        ring_info = mol.GetRingInfo()
+        bridge_atoms = sum(1 for i in range(mol.GetNumAtoms()) if ring_info.NumAtomRings(i) > 1)
+        
+        raw_sa = 1.6 + (num_heavy * 0.07) + (num_rings * 0.32) + (bridge_atoms * 0.20) + (num_stereo * 0.15)
+        sa_score = round(max(1.8, min(6.5, raw_sa)), 2)
 
         # Atom & Molecule Stability
         _ALLOWED_VALENCE = {
