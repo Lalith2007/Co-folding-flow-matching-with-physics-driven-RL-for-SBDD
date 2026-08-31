@@ -20,6 +20,7 @@ Categorical flow for atom types:
 
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -325,6 +326,9 @@ class FlowMatching(nn.Module):
         temperature: float = 0.8,     # atom type sampling temperature (< 1 = sharper, > 1 = more diverse)
         num_steps: int = None,        # override Euler integration steps (default: self.num_steps)
         element_bias: torch.Tensor = None, # optional element logit prior shift (e.g. for Oxygen/Nitrogen)
+        stochastic: bool = False,     # optional SDE Euler-Maruyama exploration
+        sigma_max: float = 0.08,      # peak noise scale for SDE
+        sigma_min: float = 0.01,      # boundary noise scale for SDE
     ) -> dict:
         """Generate a molecule via Euler integration.
 
@@ -359,6 +363,11 @@ class FlowMatching(nn.Module):
         steps = num_steps or self.num_steps
         dt = 1.0 / steps
 
+        trajectory_states = [z_coord.clone().detach()] if stochastic else None
+        trajectory_types = [z_type.clone().detach()] if stochastic else None
+        step_sigmas = [] if stochastic else None
+        timesteps = [] if stochastic else None
+
         for step in range(steps):
             t_val = step * dt
             t = torch.tensor([t_val], device=device)
@@ -372,13 +381,30 @@ class FlowMatching(nn.Module):
                 ligand_bonds=None,  # no bond info at inference time
             )
 
-            # Euler step
-            z_coord = z_coord + out["vel_coord"] * dt
+            # Integration step
+            if not stochastic:
+                # Deterministic Euler step
+                z_coord = z_coord + out["vel_coord"] * dt
+            else:
+                # Stochastic Euler-Maruyama step on zero-CoM manifold
+                sigma_s = sigma_min + (sigma_max - sigma_min) * math.sin(math.pi * (step + 0.5) / steps)
+                eps = torch.randn_like(z_coord)
+                eps_proj = eps - eps.mean(dim=0, keepdim=True)
+                z_coord = z_coord + out["vel_coord"] * dt + sigma_s * math.sqrt(dt) * eps_proj
+
+                step_sigmas.append(sigma_s)
+                timesteps.append(t_val)
+
+            # Deterministic continuous simplex update (NO Brownian noise added to simplex)
             z_type = z_type + out["vel_type"] * dt
             pocket_pos = pocket_pos + out["vel_pocket"] * dt
 
             # Re-centre CoM of ligand
             z_coord = z_coord - z_coord.mean(dim=0, keepdim=True)
+
+            if stochastic:
+                trajectory_states.append(z_coord.clone().detach())
+                trajectory_types.append(z_type.clone().detach())
 
         # ── Decode atom types from continuous probability simplex ──
         if element_bias is not None:
@@ -395,7 +421,7 @@ class FlowMatching(nn.Module):
         # Get final affinity prediction
         pK_pred = out["pK_pred"]
 
-        return {
+        res = {
             "pos": z_coord,
             "atom_types": atom_types,
             "type_probs": type_probs,
@@ -406,4 +432,11 @@ class FlowMatching(nn.Module):
             "num_atoms": N_L,
             "pocket_pos_updated": pocket_pos.detach(),
         }
+        if stochastic:
+            res["trajectory_states"] = trajectory_states
+            res["trajectory_types"] = trajectory_types
+            res["step_sigmas"] = step_sigmas
+            res["timesteps"] = timesteps
+
+        return res
 

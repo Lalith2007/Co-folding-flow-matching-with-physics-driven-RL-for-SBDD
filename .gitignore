@@ -28,3 +28,13 @@ final_dataset.json
 .tokensave/
 .claude/
 uploads/
+
+# Large dataset manifests & caches
+server_final_dataset.json
+data/server_final_dataset.json
+strict_server_train_pairs.json
+data/strict_server_train_pairs.json
+data/server_train_index.json
+data/train_pockets_cache/
+*.tar.gz
+.env

@@ -1,0 +1,122 @@
+[
+  {
+    "pdb_id": "19gs",
+    "path": "data/benchmark_20_pockets/19gs.pdb",
+    "n_residues": 3669,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1a27",
+    "path": "data/benchmark_20_pockets/1a27.pdb",
+    "n_residues": 2406,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1a52",
+    "path": "data/benchmark_20_pockets/1a52.pdb",
+    "n_residues": 3872,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1byg",
+    "path": "data/benchmark_20_pockets/1byg.pdb",
+    "n_residues": 2140,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1c4u",
+    "path": "data/benchmark_20_pockets/1c4u.pdb",
+    "n_residues": 2479,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1cbq",
+    "path": "data/benchmark_20_pockets/1cbq.pdb",
+    "n_residues": 1169,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1d3p",
+    "path": "data/benchmark_20_pockets/1d3p.pdb",
+    "n_residues": 2532,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1d4p",
+    "path": "data/benchmark_20_pockets/1d4p.pdb",
+    "n_residues": 2522,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1dmt",
+    "path": "data/benchmark_20_pockets/1dmt.pdb",
+    "n_residues": 6146,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1e5t",
+    "path": "data/benchmark_20_pockets/1e5t.pdb",
+    "n_residues": 6618,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1e7a",
+    "path": "data/benchmark_20_pockets/1e7a.pdb",
+    "n_residues": 9122,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1e8z",
+    "path": "data/benchmark_20_pockets/1e8z.pdb",
+    "n_residues": 6876,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1eou",
+    "path": "data/benchmark_20_pockets/1eou.pdb",
+    "n_residues": 2256,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1fax",
+    "path": "data/benchmark_20_pockets/1fax.pdb",
+    "n_residues": 2842,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1fdt",
+    "path": "data/benchmark_20_pockets/1fdt.pdb",
+    "n_residues": 2391,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1g3m",
+    "path": "data/benchmark_20_pockets/1g3m.pdb",
+    "n_residues": 5484,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1g45",
+    "path": "data/benchmark_20_pockets/1g45.pdb",
+    "n_residues": 2249,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1g50",
+    "path": "data/benchmark_20_pockets/1g50.pdb",
+    "n_residues": 6109,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1g7f",
+    "path": "data/benchmark_20_pockets/1g7f.pdb",
+    "n_residues": 2927,
+    "in_train_set": false
+  },
+  {
+    "pdb_id": "1gi7",
+    "path": "data/benchmark_20_pockets/1gi7.pdb",
+    "n_residues": 4801,
+    "in_train_set": false
+  }
+]

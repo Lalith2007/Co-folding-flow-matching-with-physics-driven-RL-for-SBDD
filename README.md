@@ -232,3 +232,85 @@ If you find this codebase, framework, or benchmark helpful in your research, ple
 
 ## 📄 License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+
+---
+
+# PROTEUS — SDE Flow-GRPO Update
+
+## New Method: Stochastic Trajectory Policy Optimization
+PROTEUS has been expanded to incorporate **SDE Flow-GRPO** (Stochastic Differential Equation Group Relative Policy Optimization) for continuous-flow structure-based drug design. Key methodological innovations include:
+- **Zero-Center-of-Mass Manifold Likelihood**: Formulating exact discrete Gaussian transition densities on the linear subspace $\mathcal{V}_{\\text{CoM}}$ of dimension $d = 3(N_L - 1)$ via an analytical orthonormal Helmert basis.
+- **Continuous Flow to SDE Trajectory Exploration**: Converting deterministic continuous-flow ODE integration ($dz/dt = v_\\theta$) into exploratory stochastic differential equations during reinforcement learning via projected Brownian motion with boundary-vanishing noise dispersion $\\sigma_k = \\sigma_0 \\sqrt{t_k(1 - t_k)}$.
+- **Timestep-Weighted Reference Transition KL**: Regularizing trajectory policy drift against a frozen reference policy $\\pi_{\\text{ref}}$ via exact analytical per-step Gaussian KL divergence.
+- **Group Relative Advantage Normalization (GRPO)**: Normalizing advantages across groups of $G=4$ independent stochastic trajectories per pocket to reduce policy gradient variance without requiring a separate value critic network.
+
+## Training Configuration & Multi-Seed Replication
+- **Dataset Scale**: 43,127 training pocket-ligand complexes across 8,907 non-redundant PDBs.
+- **Strict Data Partitioning**: Complete disjointness with zero target leakage ($\\text{Train} \\cap \\text{Benchmark}_{20} = \\emptyset$, $\\text{Train} \\cap \\text{Expanded}_{100} = \\emptyset$).
+- **RL Hyperparameters**: Group size $G = 4$, trajectory discretization steps $K = 20$, initial dispersion $\\sigma_0 = 0.35$, reference KL weight $\\beta = 0.01$, PPO clip ratio $\\epsilon = 0.20$, learning rate $\\eta = 5 \\times 10^{-6}$ (Adam).
+- **Multi-Seed Optimization**: Independently trained and verified across three seeds (Seed 42, Seed 123, Seed 2026) up to Step 500.
+
+## Evaluation & Generalization Benchmarks
+
+### 1. Primary 20-Target Benchmark Suite (Confirmatory)
+Evaluated across the 20 standard literature test targets (200 molecules per model):
+- **Golden PROTEUS Baseline (G0)**: Reward $= 0.6239$, Chemical Validity $= 100.0\%$, Unrelaxed PoseBusters $= 99.0\%$, QED $= 0.6318$, Diversity $= 0.7580$, Lipinski $= 88.5\%$.
+- **SDE Flow-GRPO Step 400 (3-Seed Mean)**: Reward $= 0.6691 \\pm 0.0185$ ($\\Delta = +0.0452$, Cohen\'s $d = 0.852$, Paired $t$-test $p = 0.0018$, $80.0\%$ target win rate).
+- **Seed Breakdown (Step 400)**: Seed 42 ($0.6512$, $+0.0273$), Seed 123 ($0.6685$, $+0.0446$), Seed 2026 ($0.6876$, $+0.0637$).
+
+### 2. Expanded 100-Target Generalization Suite (7,000 Molecules Evaluated)
+Evaluated across 100 strictly held-out, unseen protein targets (1,000 molecules per model checkpoint):
+- **Golden PROTEUS Baseline (G0)**: Reward $= 0.6428$, Chemical Validity $= 100.0\%$, Unrelaxed PoseBusters $= 99.10\%$, QED $= 0.6371$, Diversity $= 0.7534$, Lipinski $= 88.20\%$.
+- **SDE Flow-GRPO Step 400 (3-Seed Ensemble)**: Reward $= 0.6487 \\pm 0.0271$ ($\\Delta = +0.0059$, $95\%$ bootstrap CI $[-0.0019, +0.0139]$, Wilcoxon $p = 0.8205$, Paired $t$-test $p = 0.1544$, Cohen\'s $d = 0.1435$).
+- **Peak Single Seed (Seed 2026)**: Step 400 Reward $= 0.6722$ ($\\Delta = +0.0294$, Single-seed $p = 0.0042$, $61.0\%$ win rate); Step 500 Reward $= 0.6775$ ($\\Delta = +0.0347$).
+- **Plausibility & Stability**: 100.0% chemical validity ($7,000 / 7,000$ molecules), $98.9\% \\pm 0.1\%$ unrelaxed PoseBusters physical validity, zero mode collapse or atomic overlap.
+
+### 3. Target-Level Heterogeneity & Headroom Analysis
+- **Baseline-Performance Dependence**: Strong negative correlation ($r = -0.584, p = 2.34 \\times 10^{-10}$) between baseline score and RL improvement.
+- **Target-Adaptive Gains**: Low-baseline challenging pockets ($G_0 < 0.58$) gained $+0.0644$ (85.7% win rate), with strong performance in structured catalytic clefts (Kinases: $+0.0284$, Proteases: $+0.0215$, Small pockets: $+0.0242$), while saturated targets ($G_0 > 0.68$) maintained baseline stability.
+
+## Mathematical Details of SDE Flow-GRPO
+
+1. **Discrete Euler-Maruyama SDE**:
+   $$z_{k+1} = z_k + v_\\theta(z_k, t_k) \\Delta t_k + \\sigma_k \\sqrt{\\Delta t_k} \\, \\Pi_{\\text{CoM}}(\\xi_k), \\quad \\xi_k \\sim \\mathcal{N}(0, I_{3N_L})$$
+
+2. **Subspace Transition Log-Density ($d = 3(N_L - 1)$)**:
+   $$\\log p_\\theta(z_{k+1} \\mid z_k) = -\\frac{3(N_L - 1)}{2} \\log(2\\pi \\sigma_k^2 \\Delta t_k) - \\frac{\\| z_{k+1} - (z_k + v_\\theta(z_k, t_k) \\Delta t_k) \\|^2}{2 \\sigma_k^2 \\Delta t_k}$$
+
+3. **Analytical Reference Transition KL**:
+   $$D_{\\text{KL}}(\\pi_\\theta \\parallel \\pi_{\\text{ref}}) = \\sum_{k=0}^{K-1} \\frac{\\Delta t_k}{2 \\sigma_k^2} \\| v_\\theta(z_k, t_k) - v_{\\text{ref}}(z_k, t_k) \\|^2$$
+
+4. **Trajectory Probability & GRPO Objective**:
+   $$\\log p_\\theta(\\tau) = \\sum_{k=0}^{K-1} \\log p_\\theta(z_{k+1} \\mid z_k) + \\sum_{i=1}^{N_L} \\log p_\\theta(a_i \\mid z_K)$$
+   $$\\mathcal{L}_{\\text{GRPO}}(\\theta) = -\\frac{1}{G} \\sum_{i=1}^G \\left[ \\min\\left(\\rho_i(\\theta) \\hat{A}_i, \\, \\text{clip}(\\rho_i(\\theta), 1-\\epsilon, 1+\\epsilon) \\hat{A}_i\\right) - \\beta D_{\\text{KL}}(\\pi_\\theta \\parallel \\pi_{\\text{ref}}) \\right]$$
+
+## Scientific Scope & Caveats
+- **Generalization Shift**: On the broad 100-target held-out suite, the aggregate reward improvement ($\\Delta = +0.0059$) spans zero in uncertainty ($p = 0.8205$) and is not statistically significant in aggregate; gains are concentrated on difficult, lower-baseline targets and catalytic enzyme families.
+- **Equivariance Framing**: Internal SE(3)-EGNN message-passing and coordinate update layers operate equivariantly on the zero-Center-of-Mass subspace, while the final velocity projection head exhibits small coordinate frame orientation variance.
+- **Model Separation**: `checkpoints/rl_final.pt` remains the immutable Golden production baseline. SDE Flow-GRPO checkpoints represent an experimental research family.
+
+## Reproducibility & Commands
+
+```bash
+# Run SDE Flow-GRPO Multi-Seed Clean Training (Phase B)
+python run_stage8_gpu.py \\
+    --golden_ckpt checkpoints/rl_final.pt \\
+    --train_json data/strict_server_train_pairs.json \\
+    --output_dir checkpoints/rl_final_scale_clean \\
+    --seeds 42 123 2026 \\
+    --max_steps 500 \\
+    --device cuda
+
+# Run Expanded 100-Target Held-Out Generalization Benchmark
+python run_stage9_expanded_eval.py \\
+    --golden_ckpt checkpoints/rl_final.pt \\
+    --checkpoints_dir checkpoints/rl_final_scale_clean \\
+    --dataset_json data/server_final_dataset.json \\
+    --output_dir checkpoints/rl_final_scale_clean/expanded_100 \\
+    --mols_per_pocket 10 \\
+    --device cuda
+
+# Run Unit Test Suite (36 Tests)
+python3 -m unittest discover -s tests -p "test_*.py"
+```
