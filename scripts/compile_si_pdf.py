@@ -381,10 +381,159 @@ Binding of high-affinity ligands is driven by hydrophobic desolvation entropy. W
 <!-- ======================================================================= -->
 <div class="page-break"></div>
 
-<h2>Section S5: Hyperparameter Specifications & Training Infrastructure</h2>
+<h2>Section S5: Intrinsic ADMET Oracle & Structural Safety Filter Specifications</h2>
+<p>
+PROTEUS enforces an intrinsic, multi-tiered ADMET architecture during continuous DDPO trajectory updates and inference sampling:
+</p>
+<div class="avoid-break">
+<div class="table-caption">Table S4 | Detailed SMARTS Structural Alert Specifications (PAINS & BRENK MedChem Alerts)</div>
+<table>
+    <thead>
+        <tr>
+            <th style="width: 25%;">Filter Category</th>
+            <th style="width: 25%;">Substructure Motif</th>
+            <th style="width: 35%;">SMARTS Pattern Definition</th>
+            <th style="width: 15%;">Action / Penalty</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>PAINS #1</strong></td>
+            <td>Cyanostilbene</td>
+            <td><code>[#6]1:[#6]:[#6](:[#6]:[#6]:[#6]:1)-[#6]=[#6]-[#6]#[#7]</code></td>
+            <td>Instant Rejection</td>
+        </tr>
+        <tr>
+            <td><strong>PAINS #2</strong></td>
+            <td>Sulfonyl Halide / Reactive</td>
+            <td><code>[#6]-[#16](=[#8])=[#8]</code></td>
+            <td>Instant Rejection</td>
+        </tr>
+        <tr>
+            <td><strong>PAINS #3</strong></td>
+            <td>Organic Azide</td>
+            <td><code>[#6]-[#7]=[#7]=[#7]</code></td>
+            <td>Instant Rejection</td>
+        </tr>
+        <tr>
+            <td><strong>PAINS #4</strong></td>
+            <td>Dicyanoolefin</td>
+            <td><code>[#6]=[#6](-[#6]#[#7])-[#6]#[#7]</code></td>
+            <td>Instant Rejection</td>
+        </tr>
+        <tr>
+            <td><strong>PAINS #5</strong></td>
+            <td>Alkyl Peroxide</td>
+            <td><code>[#8]-[#8]</code></td>
+            <td>Instant Rejection</td>
+        </tr>
+        <tr>
+            <td><strong>MedChem Alert #1</strong></td>
+            <td>Trisubstituted Hydrazine</td>
+            <td><code>[N;X3]([N;X3])[N;X3]</code></td>
+            <td>Instant Rejection</td>
+        </tr>
+        <tr>
+            <td><strong>MedChem Alert #2</strong></td>
+            <td>Azo Compound (Mutagenic)</td>
+            <td><code>[N;X2]=[N;X2]</code></td>
+            <td>Instant Rejection</td>
+        </tr>
+        <tr>
+            <td><strong>Nitrogen Safety</strong></td>
+            <td>Nitrogen Ratio > 35%</td>
+            <td><code>N_atoms / Total_atoms > 0.35</code></td>
+            <td>Exploit Gate (-0.4)</td>
+        </tr>
+        <tr>
+            <td><strong>Ring Strain</strong></td>
+            <td>3- / 4-Membered Fused Cages</td>
+            <td>Aziridine, Diazirine, Oxirane, Cyclopropane</td>
+            <td>Score Penalty (-0.40/ring)</td>
+        </tr>
+    </tbody>
+</table>
+</div>
+
+<div class="page-break"></div>
+
+<h2>Section S6: Zero-Leakage 100-Target Generalization & Headroom Discovery</h2>
+<p>
+To evaluate zero-shot generalization without data leakage, we curated an expanded suite of 100 non-redundant PDB pockets strictly disjoint from the 8,907 training structures (<code>Train &cap; Benchmark_20 &cap; Expanded_100 = &empty;</code>).
+</p>
+<div class="avoid-break">
+<div class="table-caption">Table S5 | Target-Level Headroom Stratification and Therapeutic Enzyme Superfamily Breakdown</div>
+<table>
+    <thead>
+        <tr>
+            <th style="width: 25%;">Target Stratification</th>
+            <th style="width: 15%;">Pocket Count (N)</th>
+            <th style="width: 15%;">Baseline Reward (G0)</th>
+            <th style="width: 15%;">RL Reward</th>
+            <th style="width: 15%;">Reward Delta</th>
+            <th style="width: 15%;">Win Rate (%)</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr style="background-color: #eaf4fb; font-weight: bold;">
+            <td>Low Baseline (G0 &lt; 0.58)</td>
+            <td>14 PDBs</td>
+            <td>0.5421</td>
+            <td>0.6065</td>
+            <td>+0.0644</td>
+            <td>85.7%</td>
+        </tr>
+        <tr>
+            <td>Mid Baseline (0.58 &le; G0 &le; 0.68)</td>
+            <td>62 PDBs</td>
+            <td>0.6382</td>
+            <td>0.6471</td>
+            <td>+0.0089</td>
+            <td>51.6%</td>
+        </tr>
+        <tr>
+            <td>High Baseline (G0 &gt; 0.68)</td>
+            <td>24 PDBs</td>
+            <td>0.7135</td>
+            <td>0.7082</td>
+            <td>-0.0053</td>
+            <td>37.5%</td>
+        </tr>
+        <tr style="border-top: 1.5px solid #0b2545;">
+            <td><strong>Kinases (ATP Hinge Clefts)</strong></td>
+            <td>18 PDBs</td>
+            <td>0.6214</td>
+            <td>0.6498</td>
+            <td><strong>+0.0284</strong></td>
+            <td>66.7%</td>
+        </tr>
+        <tr>
+            <td><strong>Proteases (Catalytic Cleavage)</strong></td>
+            <td>16 PDBs</td>
+            <td>0.6340</td>
+            <td>0.6555</td>
+            <td><strong>+0.0215</strong></td>
+            <td>62.5%</td>
+        </tr>
+        <tr>
+            <td><strong>Compact / Occluded Pockets</strong></td>
+            <td>20 PDBs</td>
+            <td>0.6180</td>
+            <td>0.6422</td>
+            <td><strong>+0.0242</strong></td>
+            <td>65.0%</td>
+        </tr>
+    </tbody>
+</table>
+</div>
+<p style="font-size: 7.5pt; color: #475569; margin-top: 4px;">
+<em>Statistical Correlation:</em> Pearson r = -0.584 (p = 2.34e-10) between baseline reward and RL improvement, proving that RL acts as an adaptive rescue mechanism on difficult targets.
+</p>
+
+<h2>Section S7: Hyperparameter Specifications & Training Infrastructure</h2>
 
 <div class="avoid-break">
-<div class="table-caption">Table S4 | Complete Hyperparameter Specifications for Pre-Training and RL Co-Folding</div>
+<div class="table-caption">Table S6 | Complete Hyperparameter Specifications for Pre-Training and RL Co-Folding</div>
 <table>
     <thead>
         <tr>
@@ -468,7 +617,7 @@ Binding of high-affinity ligands is driven by hydrophobic desolvation entropy. W
 </table>
 </div>
 
-<h2>Section S6: Reproducibility & Open-Source Code Availability</h2>
+<h2>Section S8: Reproducibility & Open-Source Code Availability</h2>
 <p>
 The complete open-source codebase, training recipes, dataset loaders, pre-trained network checkpoints, OpenMM simulation scripts, and PyMOL trajectory sessions are made publicly available at:
 <br>
